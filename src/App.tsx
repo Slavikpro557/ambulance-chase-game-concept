@@ -124,18 +124,31 @@ export function App() {
           break;
         }
         case 'fullSync': {
-          // Guest receives full game state or round end
+          // Guest receives full game state (new round or initial sync)
           if (s.mp.netRole === 'guest') {
             try {
               const payload = msg.data as any;
-              // Check if this is a round end notification
+              // Round end — guest shows saved/failed screen, host will auto-restart
               if (payload.roundEnd) {
+                stateRef.current = {
+                  ...s,
+                  screen: payload.roundEnd as 'saved' | 'failed',
+                  missionIndex: payload.missionIndex ?? s.missionIndex,
+                  mp: { ...s.mp, roundEndTime: performance.now() },
+                };
                 gameAudio.siren(false);
+                setForceUpdate(v => v + 1);
+                break;
+              }
+              // Victory — all missions completed
+              if (payload.victory) {
                 stateRef.current = {
                   ...s,
                   screen: 'lobby',
-                  mp: { ...s.mp, lobbyScreen: 'modeSelect' },
+                  missionIndex: 0,
+                  mp: { ...s.mp, lobbyScreen: 'modeSelect', roundEndTime: 0 },
                 };
+                s.flashMessages.push({ text: '🏆 Все миссии пройдены! Победа!', timer: 300, color: '#fbbf24' });
                 setForceUpdate(v => v + 1);
                 break;
               }
@@ -189,7 +202,7 @@ export function App() {
   }, []);
 
   // === MULTIPLAYER: Start game (host) ===
-  const startMultiplayerGame = useCallback(() => {
+  const startMultiplayerGame = useCallback((overrideMissionIdx?: number) => {
     const s = stateRef.current;
     if (!s.mp || s.mp.netRole !== 'host') return;
     const net = networkRef.current;
@@ -197,16 +210,31 @@ export function App() {
 
     // Start a mission using the multiplayer mode
     const mode = s.mp.multiplayerMode;
+    const missionIdx = overrideMissionIdx ?? s.missionIndex;
     let newState: GameState;
 
     if (mode === 'copsAndRobbers') {
       // P1 is ambulance, P2 is runner
-      newState = startMission(s, 0);
+      newState = startMission(s, missionIdx);
       newState.gameMode = mode;
     } else {
       // All other modes: start as ambulance mode mission
-      newState = startMission(s, 0);
+      newState = startMission(s, missionIdx);
       newState.gameMode = mode;
+    }
+
+    // If all missions done, return to lobby with victory message
+    if (newState.screen === 'ending') {
+      stateRef.current = {
+        ...s,
+        screen: 'lobby',
+        missionIndex: 0,
+        mp: { ...s.mp, lobbyScreen: 'modeSelect', roundEndTime: 0 },
+      };
+      s.flashMessages.push({ text: '🏆 Все миссии пройдены! Победа!', timer: 300, color: '#fbbf24' });
+      net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { victory: true } });
+      setForceUpdate(v => v + 1);
+      return;
     }
 
     // Create second ambulance or runner for MP
@@ -956,9 +984,10 @@ export function App() {
           // Solo or Host: run simulation
           stateRef.current = updateGame(stateRef.current, dt);
 
-          // Host: detect round end and notify guest
+          // Host: notify guest of round end so they see saved/failed screen too
           if (isHost && net?.isConnected && prevScreen === 'playing' && stateRef.current.screen !== 'playing') {
-            net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: stateRef.current.screen } });
+            const endScreen = stateRef.current.screen; // 'saved' or 'failed'
+            net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: endScreen, missionIndex: stateRef.current.missionIndex } });
           }
 
           // Host: send snapshot every 6th frame (~10/sec) to avoid buffer overflow
@@ -996,7 +1025,7 @@ export function App() {
         }
       }
 
-      // Multiplayer: auto-return to lobby after saved/failed (3 sec)
+      // Multiplayer: auto-restart after saved/failed (3 sec)
       if (isMP && (stateRef.current.screen === 'saved' || stateRef.current.screen === 'failed')) {
         if (!stateRef.current.mp?.roundEndTime) {
           stateRef.current = {
@@ -1005,16 +1034,21 @@ export function App() {
           };
         } else if (performance.now() - stateRef.current.mp.roundEndTime > 3000) {
           gameAudio.siren(false);
-          // Host notifies guest
+          // Host: auto-start next round
           if (isHost && net?.isConnected) {
-            net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: stateRef.current.screen } });
+            const wasSaved = stateRef.current.screen === 'saved';
+            const currentMission = stateRef.current.missionIndex;
+            // Saved = advance to next mission; Failed = retry same mission
+            const nextMission = wasSaved ? currentMission + 1 : currentMission;
+            stateRef.current = {
+              ...stateRef.current,
+              missionIndex: nextMission,
+              mp: { ...stateRef.current.mp!, roundEndTime: 0 },
+            };
+            startMultiplayerGame(nextMission);
+          } else if (isGuest) {
+            // Guest: just wait — host will send fullSync + start
           }
-          stateRef.current = {
-            ...stateRef.current,
-            screen: 'lobby',
-            mp: { ...stateRef.current.mp!, lobbyScreen: 'modeSelect', roundEndTime: 0 },
-          };
-          setForceUpdate(v => v + 1);
         }
       }
 

@@ -1102,6 +1102,22 @@ export function renderSaved(ctx: CanvasRenderingContext2D, state: GameState, w: 
     ctx.fillStyle = '#94a3b8'; ctx.font = `bold ${Math.round(15 * s)}px Arial`;
     ctx.fillText('🏠 В МЕНЮ', cx, menuBtnY2 + menuBtnH2 / 2);
   }
+
+  // Multiplayer: auto-restart countdown overlay
+  if (state.mp?.isMultiplayer && state.mp.roundEndTime > 0) {
+    const elapsed = performance.now() - state.mp.roundEndTime;
+    const remaining = Math.max(0, Math.ceil((3000 - elapsed) / 1000));
+    const missionNum = state.missionIndex + 2; // next mission (1-based)
+    const totalMissions = MISSIONS.length;
+    const isLastMission = state.missionIndex + 1 >= totalMissions;
+    const nextLabel = isLastMission ? '🏆 Финал!' : `Миссия ${missionNum}/${totalMissions}`;
+    const countFS = Math.round(18 * s);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, h - Math.round(50 * s), w, Math.round(50 * s));
+    ctx.fillStyle = '#60a5fa'; ctx.font = `bold ${countFS}px Arial`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(`⏳ ${nextLabel} через ${remaining}...`, cx, h - Math.round(25 * s));
+  }
 }
 
 export function renderFailed(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
@@ -1191,6 +1207,20 @@ export function renderFailed(ctx: CanvasRenderingContext2D, state: GameState, w:
   ctx.beginPath(); ctx.roundRect(btnX, menuBtnY, menuBtnW, menuBtnH, 10); ctx.fill();
   ctx.fillStyle = '#94a3b8'; ctx.font = `bold ${Math.round(15 * s)}px Arial`;
   ctx.fillText('🏠 В МЕНЮ', cx, menuBtnY + menuBtnH / 2);
+
+  // Multiplayer: auto-retry countdown overlay
+  if (state.mp?.isMultiplayer && state.mp.roundEndTime > 0) {
+    const elapsed = performance.now() - state.mp.roundEndTime;
+    const remaining = Math.max(0, Math.ceil((3000 - elapsed) / 1000));
+    const missionNum = state.missionIndex + 1; // same mission (1-based)
+    const totalMissions = MISSIONS.length;
+    const countFS = Math.round(18 * s);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, h - Math.round(50 * s), w, Math.round(50 * s));
+    ctx.fillStyle = '#ef4444'; ctx.font = `bold ${countFS}px Arial`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(`🔄 Повтор миссии ${missionNum}/${totalMissions} через ${remaining}...`, cx, h - Math.round(25 * s));
+  }
 }
 
 export function renderUpgrade(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
@@ -1845,12 +1875,17 @@ export function drawMultiplayerHUD(ctx: CanvasRenderingContext2D, state: GameSta
   if (!mp) return;
   const s = sf(w, h);
 
-  // Ping indicator (top-right)
+  // Mission indicator + Ping (top-right)
   ctx.save();
-  ctx.fillStyle = mp.ping < 50 ? '#34d399' : mp.ping < 100 ? '#fbbf24' : '#ef4444';
-  ctx.font = `${Math.round(12 * s)}px Arial`;
+  const infoFS = Math.round(12 * s);
+  ctx.font = `${infoFS}px Arial`;
   ctx.textAlign = 'right'; ctx.textBaseline = 'top';
-  ctx.fillText(`${mp.ping}ms`, w - 10, 10);
+  // Mission number
+  ctx.fillStyle = '#60a5fa';
+  ctx.fillText(`Миссия ${state.missionIndex + 1}/${MISSIONS.length}`, w - 10, 10);
+  // Ping
+  ctx.fillStyle = mp.ping < 50 ? '#34d399' : mp.ping < 100 ? '#fbbf24' : '#ef4444';
+  ctx.fillText(`${mp.ping}ms`, w - 10, 10 + infoFS + 4);
 
   // Player labels
   ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
