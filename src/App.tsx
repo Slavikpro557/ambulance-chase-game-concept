@@ -1092,6 +1092,73 @@ export function App() {
     handleAction(x, y);
   }, [handleAction]);
 
+  // Mobile HTML overlay for room code input (Canvas touch is unreliable on iOS)
+  const state = stateRef.current;
+  const showMobileCodeInput = isMobileRef.current && state.screen === 'lobby' && state.mp?.lobbyScreen === 'guestEnterCode';
+  const showMobileHostCode = isMobileRef.current && state.screen === 'lobby' && state.mp?.lobbyScreen === 'hostWaiting' && !!state.mp?.roomCode;
+  const mobileInputCode = state.mp?.inputCode || '';
+  const mobileInputError = state.mp?.inputError || '';
+  const mobileRoomCode = state.mp?.roomCode || '';
+
+  const handleMobileKeyPress = useCallback((ch: string) => {
+    const s = stateRef.current;
+    if (!s.mp) return;
+    if (ch === 'DEL') {
+      if (s.mp.inputCode.length > 0) {
+        stateRef.current = { ...s, mp: { ...s.mp, inputCode: s.mp.inputCode.slice(0, -1), inputError: '' } };
+        setForceUpdate(v => v + 1);
+      }
+      return;
+    }
+    if (ch === 'BACK') {
+      networkRef.current?.destroy();
+      networkRef.current = null;
+      stateRef.current = createInitialStateWithSave();
+      setForceUpdate(v => v + 1);
+      return;
+    }
+    if (s.mp.inputCode.length < 6) {
+      const newCode = s.mp.inputCode + ch;
+      stateRef.current = { ...s, mp: { ...s.mp, inputCode: newCode, inputError: '' } };
+      setForceUpdate(v => v + 1);
+      if (newCode.length === 6 && networkRef.current) {
+        networkRef.current.joinRoom(newCode).catch((err) => {
+          const s2 = stateRef.current;
+          if (s2.mp) {
+            const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
+            stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: errMsg } };
+            setForceUpdate(v => v + 1);
+          }
+        });
+      }
+    }
+  }, []);
+
+  const handleMobileCopy = useCallback(() => {
+    const code = stateRef.current.mp?.roomCode;
+    if (!code) return;
+    if (navigator.share) {
+      navigator.share({ text: code }).catch(() => {});
+    } else if (copyInputRef.current) {
+      const inp = copyInputRef.current;
+      inp.value = code;
+      inp.style.display = 'block';
+      inp.focus();
+      inp.setSelectionRange(0, code.length);
+      try { document.execCommand('copy'); } catch {}
+      inp.style.display = 'none';
+    }
+  }, []);
+
+  const handleMobileBack = useCallback(() => {
+    networkRef.current?.destroy();
+    networkRef.current = null;
+    stateRef.current = createInitialStateWithSave();
+    setForceUpdate(v => v + 1);
+  }, []);
+
+  const kbChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
   return (
     <div className="w-screen h-screen overflow-hidden bg-black select-none">
       <canvas ref={canvasRef} className="block w-full h-full" onClick={handleCanvasClick} style={{ touchAction: 'none' }} />
@@ -1102,6 +1169,104 @@ export function App() {
         style={{ position: 'fixed', top: '-9999px', left: '-9999px', opacity: 0, display: 'none', fontSize: '16px' }}
         aria-hidden="true"
       />
+      {/* Mobile HTML overlay: Guest code input */}
+      {showMobileCodeInput && (
+        <div style={{
+          position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', background: 'rgba(15,23,42,0.97)',
+          zIndex: 100, padding: '16px', gap: '12px',
+        }}>
+          <div style={{ color: '#60a5fa', fontSize: '22px', fontWeight: 'bold' }}>🔗 Введите код комнаты</div>
+          {/* Code display boxes */}
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {[0,1,2,3,4,5].map(i => (
+              <div key={i} style={{
+                width: '44px', height: '52px', borderRadius: '8px',
+                background: i === mobileInputCode.length ? 'rgba(59,130,246,0.3)' : 'rgba(30,41,59,0.9)',
+                border: i === mobileInputCode.length ? '2px solid #60a5fa' : '1px solid #475569',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#34d399', fontSize: '26px', fontWeight: 'bold', fontFamily: 'monospace',
+              }}>
+                {mobileInputCode[i] || ''}
+              </div>
+            ))}
+          </div>
+          {/* Error */}
+          {mobileInputError && <div style={{ color: '#ef4444', fontSize: '14px', fontWeight: 'bold' }}>{mobileInputError}</div>}
+          {/* Connecting status */}
+          {mobileInputCode.length === 6 && !mobileInputError && (
+            <div style={{ color: '#fbbf24', fontSize: '16px' }}>Подключение...</div>
+          )}
+          {/* On-screen keyboard */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: '6px',
+            maxWidth: '360px', width: '100%',
+          }}>
+            {kbChars.split('').map(ch => (
+              <button key={ch} onClick={() => handleMobileKeyPress(ch)} style={{
+                padding: '12px 0', borderRadius: '6px', border: 'none',
+                background: mobileInputCode.length >= 6 ? 'rgba(51,65,85,0.3)' : 'rgba(51,65,85,0.9)',
+                color: mobileInputCode.length >= 6 ? 'rgba(255,255,255,0.3)' : '#e2e8f0',
+                fontSize: '16px', fontWeight: 'bold', fontFamily: 'monospace',
+                cursor: 'pointer', WebkitTapHighlightColor: 'transparent',
+                touchAction: 'manipulation',
+              }}>{ch}</button>
+            ))}
+          </div>
+          {/* Backspace + Back buttons */}
+          <div style={{ display: 'flex', gap: '12px', width: '100%', maxWidth: '360px' }}>
+            <button onClick={() => handleMobileKeyPress('DEL')} style={{
+              flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+              background: 'rgba(239,68,68,0.6)', color: '#fff', fontSize: '16px',
+              fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
+            }}>⌫ Удалить</button>
+            <button onClick={() => handleMobileKeyPress('BACK')} style={{
+              flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+              background: 'rgba(100,116,139,0.6)', color: '#fff', fontSize: '16px',
+              fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
+            }}>◀ Назад</button>
+          </div>
+        </div>
+      )}
+      {/* Mobile HTML overlay: Host room code display */}
+      {showMobileHostCode && (
+        <div style={{
+          position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', background: 'rgba(15,23,42,0.97)',
+          zIndex: 100, padding: '16px', gap: '16px',
+        }}>
+          <div style={{ color: '#fbbf24', fontSize: '22px', fontWeight: 'bold' }}>🏠 Код комнаты</div>
+          <div style={{ color: '#94a3b8', fontSize: '14px' }}>Скажите код другу:</div>
+          {/* Large room code */}
+          <div style={{
+            display: 'flex', gap: '12px', padding: '16px 24px',
+            background: 'rgba(30,41,59,0.9)', borderRadius: '12px',
+            border: '2px solid #34d399',
+          }}>
+            {mobileRoomCode.split('').map((ch, i) => (
+              <span key={i} style={{
+                color: '#34d399', fontSize: '36px', fontWeight: 'bold', fontFamily: 'monospace',
+              }}>{ch}</span>
+            ))}
+          </div>
+          {/* Share / Copy button */}
+          <button onClick={handleMobileCopy} style={{
+            padding: '14px 32px', borderRadius: '10px', border: 'none',
+            background: 'rgba(34,197,94,0.8)', color: '#fff', fontSize: '16px',
+            fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
+            width: '100%', maxWidth: '300px',
+          }}>{navigator.share ? '📤 Поделиться кодом' : '📋 Копировать код'}</button>
+          {/* Waiting animation */}
+          <div style={{ color: '#fbbf24', fontSize: '16px' }}>⏳ Ожидание игрока...</div>
+          {/* Back button */}
+          <button onClick={handleMobileBack} style={{
+            padding: '12px 32px', borderRadius: '8px', border: 'none',
+            background: 'rgba(100,116,139,0.6)', color: '#fff', fontSize: '14px',
+            fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
+            width: '100%', maxWidth: '300px',
+          }}>◀ Назад в меню</button>
+        </div>
+      )}
     </div>
   );
 }
