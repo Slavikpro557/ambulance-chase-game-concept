@@ -96,18 +96,22 @@ export function App() {
 
       switch (msg.type) {
         case 'keys': {
-          // Host receives guest's keys
-          if (s.mp.netRole === 'host' && msg.data instanceof Uint8Array) {
-            const keys = deserializeKeys(msg.data[0]);
-            s.mp.remotePlayer.keys = keys;
+          // Host receives guest's keys (data is [keyByte] array or Uint8Array)
+          if (s.mp.netRole === 'host' && msg.data) {
+            const arr = msg.data as number[] | Uint8Array;
+            const keyByte = arr[0];
+            if (typeof keyByte === 'number') {
+              const keys = deserializeKeys(keyByte);
+              s.mp.remotePlayer.keys = keys;
+            }
           }
           break;
         }
         case 'snapshot': {
-          // Guest receives state snapshot
+          // Guest receives state snapshot (data is string)
           if (s.mp.netRole === 'guest') {
             try {
-              const snapData = typeof msg.data === 'string' ? msg.data : new TextDecoder().decode(msg.data as Uint8Array);
+              const snapData = typeof msg.data === 'string' ? msg.data : String(msg.data);
               const snap = deserializeSnapshot(snapData);
               const prevSnap = s.mp.currSnapshot;
               stateRef.current = {
@@ -589,10 +593,11 @@ export function App() {
                   setForceUpdate(v => v + 1);
                   // Auto-connect when 6 chars entered
                   if (newCode.length === 6 && networkRef.current) {
-                    networkRef.current.joinRoom(newCode).catch(() => {
+                    networkRef.current.joinRoom(newCode).catch((err) => {
                       const s2 = stateRef.current;
                       if (s2.mp) {
-                        stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: 'Комната не найдена' } };
+                        const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
+                        stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: errMsg } };
                         setForceUpdate(v => v + 1);
                       }
                     });
@@ -668,10 +673,11 @@ export function App() {
           setForceUpdate(v => v + 1);
           // Auto-connect at 6 chars
           if (newCode.length === 6 && networkRef.current) {
-            networkRef.current.joinRoom(newCode).catch(() => {
+            networkRef.current.joinRoom(newCode).catch((err) => {
               const s2 = stateRef.current;
               if (s2.mp) {
-                stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: 'Комната не найдена' } };
+                const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
+                stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: errMsg } };
                 setForceUpdate(v => v + 1);
               }
             });
