@@ -170,10 +170,15 @@ export class GameNetwork {
 
       this.peer.on('disconnected', () => {
         log('Peer disconnected from signaling server');
-        // Try to reconnect to signaling server
+        // Only matters if we haven't established DataConnection yet
+        // If DataConnection is open, signaling server isn't needed anymore
+        if (this.dataConn?.open) {
+          log('DataConnection still open — ignoring signaling disconnect');
+          return;
+        }
         if (this.peer && !this.peer.destroyed) {
-          log('Attempting reconnect...');
-          this.peer.reconnect();
+          log('Attempting signaling reconnect...');
+          try { this.peer.reconnect(); } catch { /* ignore */ }
         }
       });
     });
@@ -265,17 +270,13 @@ export class GameNetwork {
 
     conn.on('error', (err) => {
       log('DataConnection error:', err);
-      // Don't immediately disconnect on non-fatal errors
-      if (this.state === 'connected') {
-        // Check if channel is actually dead
-        if (!this.dataConn?.open) {
-          this.setState('disconnected');
-          this.stopPing();
-        }
-      } else {
+      // Never immediately disconnect — rely on ping timeout for detection
+      // Only disconnect if the channel is definitely closed and we're not in setup
+      if (this.state !== 'connected') {
         this.setState('disconnected');
         this.stopPing();
       }
+      // If connected, just log — ping timeout will catch real disconnects
     });
   }
 
@@ -362,16 +363,23 @@ export class GameNetwork {
     this.stopPing();
     this.lastPongReceived = performance.now();
     this.pingInterval = setInterval(() => {
-      // Check for dead connection: no pong in 10 seconds
-      if (this.lastPongReceived > 0 && performance.now() - this.lastPongReceived > 10000) {
-        log('No pong for 10s — connection dead');
+      // Check for dead connection: no pong in 20 seconds (generous to survive GC pauses)
+      if (this.lastPongReceived > 0 && performance.now() - this.lastPongReceived > 20000) {
+        log('No pong for 20s — connection dead');
+        this.setState('disconnected');
+        this.stopPing();
+        return;
+      }
+      // Also verify channel is actually open
+      if (this.dataConn && !this.dataConn.open) {
+        log('DataConnection no longer open');
         this.setState('disconnected');
         this.stopPing();
         return;
       }
       this.lastPingSent = performance.now();
       this.sendReliable({ type: 'ping', seq: this.seq++, ts: this.lastPingSent, data: null });
-    }, 2000);
+    }, 3000); // ping every 3s instead of 2s to reduce traffic
   }
 
   private stopPing() {

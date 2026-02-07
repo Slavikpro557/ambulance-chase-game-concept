@@ -387,8 +387,8 @@ export function App() {
       return cx >= btnX && cx <= btnX + btnW && cy >= menuBtnY - 30 && cy <= menuBtnY + menuBtnH + 10;
     };
 
-    // Multiplayer disconnect: click anywhere on overlay → return to menu
-    if (state.screen === 'playing' && state.mp?.disconnected) {
+    // Multiplayer disconnect: click anywhere on ANY screen → return to menu
+    if (state.mp?.disconnected) {
       gameAudio.siren(false);
       networkRef.current?.destroy();
       networkRef.current = null;
@@ -885,8 +885,8 @@ export function App() {
         case 'h': case 'H': case 'р': case 'Р': keys.honk = true; break;
         case 'Escape':
           e.preventDefault();
-          if (state.screen === 'playing' && state.mp?.disconnected) {
-            // Disconnected — Escape goes to menu
+          if (state.mp?.disconnected) {
+            // Disconnected on ANY screen — Escape goes to menu
             gameAudio.siren(false);
             networkRef.current?.destroy();
             networkRef.current = null;
@@ -1334,6 +1334,25 @@ export function App() {
         case 'multiplayerMenu': renderMultiplayerMenu(ctx, w, h, time); break;
         case 'lobby': renderLobby(ctx, stateRef.current, w, h, time); break;
       }
+
+      // Disconnect overlay on any screen (not just playing)
+      if (stateRef.current.mp?.disconnected && stateRef.current.screen !== 'playing') {
+        const ds = sfCalc(w, h);
+        ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = '#ef4444'; ctx.font = `bold ${Math.round(28 * ds)}px Arial`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('⚠ Соединение потеряно', w / 2, h / 2 - Math.round(40 * ds));
+        ctx.fillStyle = '#94a3b8'; ctx.font = `${Math.round(16 * ds)}px Arial`;
+        ctx.fillText('Нажмите чтобы выйти в меню', w / 2, h / 2);
+        const dbW = Math.min(Math.round(260 * ds), w - 40);
+        const dbH = Math.round(52 * ds);
+        const dbX = w / 2 - dbW / 2, dbY = h / 2 + Math.round(30 * ds);
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.roundRect(dbX, dbY, dbW, dbH, 10); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(18 * ds)}px Arial`;
+        ctx.fillText('В ГЛАВНОЕ МЕНЮ', w / 2, dbY + dbH / 2);
+      }
+
       animRef.current = requestAnimationFrame(gameLoop);
     };
     animRef.current = requestAnimationFrame(gameLoop);
