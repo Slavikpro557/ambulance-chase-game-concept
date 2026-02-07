@@ -1,0 +1,985 @@
+import { useRef, useEffect, useCallback, useState } from 'react';
+import { GameState, Upgrades, GameMode, MultiplayerState, MultiplayerMode, Keys } from './game/types';
+import { createInitialState, createInitialStateWithSave, startMission, startRunnerLevel, updateGame, applyUpgrade, saveProgress, loadProgress, MISSIONS } from './game/engine';
+import { render, renderMenu, renderBriefing, renderRunnerBriefing, renderSaved, renderFailed, renderUpgrade, renderEnding, renderPaused, getPauseButtonLayout, renderTransition, renderSpeedLines, renderTutorial, renderOrientationHint, renderMultiplayerMenu, getMultiplayerMenuLayout, renderLobby, getLobbyLayout, drawMultiplayerHUD } from './game/renderer';
+import { gameAudio } from './game/audio';
+import { GameNetwork, NetMessage } from './game/net';
+import { serializeKeys, deserializeKeys, createSnapshot, serializeSnapshot, deserializeSnapshot, createFullSyncPayload, applySnapshotToState, applyFullSyncPayload, interpolateSnapshots } from './game/netSync';
+
+interface JoystickState {
+  active: boolean; startX: number; startY: number;
+  currentX: number; currentY: number; touchId: number | null;
+}
+
+function sfCalc(w: number, h: number): number {
+  return Math.max(0.65, Math.min(1.2, Math.min(w, h) / 500));
+}
+
+function vibrate(ms: number | number[]) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+function createDefaultKeys(): Keys {
+  return { up: false, down: false, left: false, right: false, space: false, honk: false };
+}
+
+function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
+  return {
+    isMultiplayer: true,
+    netRole: role,
+    multiplayerMode: 'coopRescue',
+    lobbyScreen: role === 'host' ? 'hostWaiting' : 'guestEnterCode',
+    localPlayer: { id: role === 'host' ? 0 : 1, role, name: role === 'host' ? 'Хост' : 'Гость', keys: createDefaultKeys() },
+    remotePlayer: { id: role === 'host' ? 1 : 0, role: role === 'host' ? 'guest' : 'host', name: role === 'host' ? 'Гость' : 'Хост', keys: createDefaultKeys() },
+    ambulance2: null,
+    runner2: null,
+    scores: [0, 0],
+    roomCode: '',
+    ping: 0,
+    connected: false,
+    prevSnapshot: null,
+    currSnapshot: null,
+    interpolationT: 0,
+    snapshotTime: 0,
+    derbyRound: 1,
+    derbyWins: [0, 0],
+    disconnected: false,
+    disconnectTimer: 0,
+    rematchRequested: false,
+    remoteRematchRequested: false,
+  };
+}
+
+export function App() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stateRef = useRef<GameState>(createInitialStateWithSave());
+  const animRef = useRef<number>(0);
+  const lastTimeRef = useRef(0);
+  const joystickRef = useRef<JoystickState>({ active: false, startX: 0, startY: 0, currentX: 0, currentY: 0, touchId: null });
+  const isMobileRef = useRef(false);
+  const audioInitRef = useRef(false);
+  const orientationDismissedRef = useRef(false);
+  const lastCountdownRef = useRef(0);
+  const networkRef = useRef<GameNetwork | null>(null);
+  const snapshotFrameRef = useRef(0);
+  const [, setForceUpdate] = useState(0);
+
+  useEffect(() => { isMobileRef.current = 'ontouchstart' in window || navigator.maxTouchPoints > 0; }, []);
+
+  const initAudio = useCallback(() => {
+    if (!audioInitRef.current) {
+      gameAudio.init();
+      audioInitRef.current = true;
+    }
+  }, []);
+
+  // === MULTIPLAYER: Network callbacks ===
+  const setupNetworkCallbacks = useCallback((net: GameNetwork) => {
+    net.onStateChange = (connState) => {
+      const s = stateRef.current;
+      if (!s.mp) return;
+      if (connState === 'connected') {
+        stateRef.current = { ...s, mp: { ...s.mp, connected: true, lobbyScreen: 'modeSelect' } };
+        setForceUpdate(v => v + 1);
+      } else if (connState === 'disconnected') {
+        stateRef.current = { ...s, mp: { ...s.mp, disconnected: true } };
+        setForceUpdate(v => v + 1);
+      }
+    };
+
+    net.onMessage = (msg: NetMessage) => {
+      const s = stateRef.current;
+      if (!s.mp) return;
+
+      switch (msg.type) {
+        case 'keys': {
+          // Host receives guest's keys
+          if (s.mp.netRole === 'host' && msg.data instanceof Uint8Array) {
+            const keys = deserializeKeys(msg.data[0]);
+            s.mp.remotePlayer.keys = keys;
+          }
+          break;
+        }
+        case 'snapshot': {
+          // Guest receives state snapshot
+          if (s.mp.netRole === 'guest') {
+            try {
+              const snapData = typeof msg.data === 'string' ? msg.data : new TextDecoder().decode(msg.data as Uint8Array);
+              const snap = deserializeSnapshot(snapData);
+              const prevSnap = s.mp.currSnapshot;
+              stateRef.current = {
+                ...s,
+                mp: { ...s.mp, prevSnapshot: prevSnap, currSnapshot: snap, snapshotTime: performance.now(), interpolationT: 0 },
+              };
+            } catch { /* ignore bad snapshots */ }
+          }
+          break;
+        }
+        case 'fullSync': {
+          // Guest receives full game state
+          if (s.mp.netRole === 'guest') {
+            try {
+              const payload = msg.data as any;
+              const newState = applyFullSyncPayload(s, payload, s.mp.multiplayerMode);
+              stateRef.current = newState;
+              setForceUpdate(v => v + 1);
+            } catch (err) {
+              console.error('Failed to apply full sync:', err);
+            }
+          }
+          break;
+        }
+        case 'start': {
+          // Guest: game is starting
+          if (s.mp.netRole === 'guest') {
+            stateRef.current = { ...s, screen: 'playing' };
+            gameAudio.siren(true);
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+        case 'modeSelect': {
+          // Guest: host selected a mode
+          if (s.mp.netRole === 'guest') {
+            stateRef.current = { ...s, mp: { ...s.mp, multiplayerMode: msg.data as MultiplayerMode, lobbyScreen: 'modeSelect' } };
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+        case 'rematch': {
+          if (s.mp) {
+            stateRef.current = { ...s, mp: { ...s.mp, remoteRematchRequested: true } };
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+      }
+    };
+
+    // Update ping periodically
+    const pingUpdater = setInterval(() => {
+      const s = stateRef.current;
+      if (s.mp && net.isConnected) {
+        stateRef.current = { ...s, mp: { ...s.mp, ping: net.ping } };
+      }
+    }, 2000);
+
+    // Store cleanup for this interval
+    const origDestroy = net.destroy.bind(net);
+    net.destroy = () => { clearInterval(pingUpdater); origDestroy(); };
+  }, []);
+
+  // === MULTIPLAYER: Start game (host) ===
+  const startMultiplayerGame = useCallback(() => {
+    const s = stateRef.current;
+    if (!s.mp || s.mp.netRole !== 'host') return;
+    const net = networkRef.current;
+    if (!net?.isConnected) return;
+
+    // Start a mission using the multiplayer mode
+    const mode = s.mp.multiplayerMode;
+    let newState: GameState;
+
+    if (mode === 'copsAndRobbers') {
+      // P1 is ambulance, P2 is runner
+      newState = startMission(s, 0);
+      newState.gameMode = mode;
+    } else {
+      // All other modes: start as ambulance mode mission
+      newState = startMission(s, 0);
+      newState.gameMode = mode;
+    }
+
+    // Create second ambulance or runner for MP
+    if (mode === 'coopRescue' || mode === 'demolitionDerby' || mode === 'patientRace') {
+      const amb2 = { ...newState.ambulance };
+      amb2.x += 80;
+      amb2.y += 80;
+      amb2.angle = 0;
+      newState.mp = { ...s.mp, ambulance2: amb2, scores: [0, 0] };
+    } else if (mode === 'copsAndRobbers') {
+      // P2 is a runner
+      const runner2 = {
+        x: newState.ambulance.x + 300, y: newState.ambulance.y + 300,
+        vx: 0, vy: 0, angle: 0,
+        stamina: 100, maxStamina: 100, sprinting: false, speed: 0,
+        smokeBombTimer: 0, invisibleTimer: 0, speedBoostTimer: 0,
+        dialogueTimer: 0, currentDialogue: '', caughtTimer: 0,
+        playerHealth: 100, maxPlayerHealth: 100,
+        interactingHazard: false, dashCooldown: 0,
+      };
+      newState.mp = { ...s.mp, runner2: runner2, ambulance2: null, scores: [0, 0] };
+    }
+
+    if (!newState.mp) newState.mp = s.mp;
+    newState.screen = 'playing';
+
+    stateRef.current = newState;
+    gameAudio.siren(true);
+
+    // Send full sync to guest
+    const payload = createFullSyncPayload(newState);
+    net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: payload });
+    // Then tell guest to start
+    setTimeout(() => {
+      net.sendReliable({ type: 'start', seq: 0, ts: performance.now(), data: null });
+    }, 100);
+
+    setForceUpdate(v => v + 1);
+  }, []);
+
+  const handleAction = useCallback((clickX?: number, clickY?: number) => {
+    initAudio();
+    const state = stateRef.current;
+    const canvas = canvasRef.current;
+
+    // Check for "back to menu" button on saved/failed screens
+    const isMenuBtn = (cx: number | undefined, cy: number | undefined, w: number, h: number): boolean => {
+      if (cx === undefined || cy === undefined) return false;
+      const s = sfCalc(w, h);
+      const btnH = Math.round(56 * s);
+      const btnW = Math.min(Math.round(300 * s), w - 32);
+      const btnX = w / 2 - btnW / 2;
+      // Menu button is below primary button
+      const menuBtnGap = Math.round(12 * s);
+      const menuBtnH = Math.round(42 * s);
+      // We need the primary button Y to compute menu button Y
+      // Simple heuristic: menu button is in the lower portion of screen
+      const menuBtnY = h - btnH - 20 + btnH + menuBtnGap;
+      return cx >= btnX && cx <= btnX + btnW && cy >= menuBtnY - 30 && cy <= menuBtnY + menuBtnH + 10;
+    };
+
+    // Multiplayer disconnect: click anywhere on overlay → return to menu
+    if (state.screen === 'playing' && state.mp?.disconnected) {
+      gameAudio.siren(false);
+      networkRef.current?.destroy();
+      networkRef.current = null;
+      stateRef.current = createInitialStateWithSave();
+      setForceUpdate(v => v + 1);
+      return;
+    }
+
+    switch (state.screen) {
+      case 'menu': {
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          const w = canvas.width, h = canvas.height;
+          const s = sfCalc(w, h);
+
+          const emojiS = Math.round(50 * s);
+          const titleS = Math.round(36 * s);
+          const subS = Math.round(22 * s);
+          const tagS = Math.round(14 * s);
+          const btnH = Math.round(56 * s);
+          const btnGap = Math.round(14 * s);
+          const totalH = emojiS + 10 + titleS + 10 + subS + 8 + tagS + 30 + btnH * 4 + btnGap * 3 + 30;
+          const startY = Math.max(20, (h - totalH) / 2);
+          const buttonsY = startY + emojiS + 10 + titleS + 10 + subS + 8 + tagS + 30;
+
+          const btnW = Math.min(Math.round(320 * s), w - 32);
+          const btnX = w / 2 - btnW / 2;
+
+          // 4 buttons: ambulance, runner, extremal, multiplayer
+          let pickedIdx = -1;
+          for (let i = 0; i < 4; i++) {
+            const by = buttonsY + i * (btnH + btnGap);
+            if (clickX >= btnX && clickX <= btnX + btnW && clickY >= by && clickY <= by + btnH) {
+              pickedIdx = i; break;
+            }
+          }
+          if (pickedIdx < 0) return;
+
+          // Request fullscreen on mobile
+          if (isMobileRef.current) {
+            try { document.documentElement.requestFullscreen?.(); } catch { /* noop */ }
+          }
+
+          if (pickedIdx === 3) {
+            // Multiplayer menu
+            stateRef.current = { ...state, screen: 'multiplayerMenu' };
+          } else {
+            const modes: GameMode[] = ['ambulance', 'runner', 'extremal'];
+            const picked = modes[pickedIdx];
+            if (picked === 'ambulance') {
+              stateRef.current = { ...state, gameMode: 'ambulance', screen: 'briefing' };
+            } else {
+              stateRef.current = { ...state, gameMode: picked, screen: 'briefing', runnerLevel: state.runnerLevel || 1, runnerScore: 0 };
+            }
+          }
+        } else {
+          return;
+        }
+        break;
+      }
+      case 'briefing': {
+        if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
+          stateRef.current = startRunnerLevel(state);
+        } else {
+          stateRef.current = startMission(state, state.missionIndex);
+        }
+        gameAudio.siren(true);
+        break;
+      }
+      case 'paused': {
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          const w = canvas.width, h = canvas.height;
+          const layout = getPauseButtonLayout(w, h);
+          for (let i = 0; i < 3; i++) {
+            const by = layout.startY + i * (layout.btnH + layout.btnGap);
+            if (clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW && clickY >= by && clickY <= by + layout.btnH) {
+              if (i === 0) { // Resume
+                stateRef.current = { ...state, screen: 'playing' };
+                gameAudio.siren(true);
+              } else if (i === 1) { // Restart
+                if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
+                  stateRef.current = startRunnerLevel(state);
+                } else {
+                  stateRef.current = startMission(state, state.missionIndex);
+                }
+                gameAudio.siren(true);
+              } else { // Menu
+                gameAudio.siren(false);
+                stateRef.current = createInitialStateWithSave();
+              }
+              break;
+            }
+          }
+        } else {
+          stateRef.current = { ...state, screen: 'playing' };
+          gameAudio.siren(true);
+        }
+        break;
+      }
+      case 'saved': {
+        // Check for menu button click
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          if (isMenuBtn(clickX, clickY, canvas.width, canvas.height)) {
+            gameAudio.siren(false);
+            saveProgress(state);
+            if (state.mp) { networkRef.current?.destroy(); networkRef.current = null; }
+            stateRef.current = createInitialStateWithSave();
+            break;
+          }
+        }
+        gameAudio.siren(false);
+        // Multiplayer: go to menu instead of next mission
+        if (state.mp?.isMultiplayer) {
+          networkRef.current?.destroy(); networkRef.current = null;
+          stateRef.current = createInitialStateWithSave();
+          break;
+        }
+        saveProgress(state);
+        if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
+          const isExtremal = state.gameMode === 'extremal';
+          const won = isExtremal
+            ? (state.runner?.playerHealth ?? 1) <= 0
+            : state.surviveTime >= state.surviveTarget;
+          if (won) {
+            stateRef.current = { ...state, screen: 'briefing' };
+          } else {
+            stateRef.current = startRunnerLevel(state);
+          }
+        } else {
+          const nextIdx = state.missionIndex + 1;
+          if (nextIdx < MISSIONS.length) {
+            stateRef.current = { ...state, screen: 'upgrade', missionIndex: nextIdx };
+          } else {
+            stateRef.current = { ...state, screen: 'ending' };
+          }
+        }
+        break;
+      }
+      case 'failed': {
+        // Check for menu button click
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          if (isMenuBtn(clickX, clickY, canvas.width, canvas.height)) {
+            gameAudio.siren(false);
+            if (state.mp) { networkRef.current?.destroy(); networkRef.current = null; }
+            stateRef.current = createInitialStateWithSave();
+            break;
+          }
+        }
+        gameAudio.siren(false);
+        // Multiplayer: go to menu instead of retry
+        if (state.mp?.isMultiplayer) {
+          networkRef.current?.destroy(); networkRef.current = null;
+          stateRef.current = createInitialStateWithSave();
+          break;
+        }
+        if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
+          stateRef.current = startRunnerLevel(state);
+        } else {
+          stateRef.current = startMission(state, state.missionIndex);
+        }
+        break;
+      }
+      case 'upgrade': {
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          const upgradeKeys: (keyof Upgrades)[] = ['engine', 'tires', 'siren', 'armor'];
+          const w = canvas.width, h = canvas.height;
+          const s = sfCalc(w, h);
+
+          const titleFS = Math.round(28 * s);
+          const moneyFS = Math.round(22 * s);
+          const cardH = Math.round(70 * s);
+          const cardGap = Math.round(12 * s);
+          const btnH = Math.round(54 * s);
+
+          const totalH = titleFS + 20 + moneyFS + 20 + upgradeKeys.length * (cardH + cardGap) + 20 + btnH;
+          const startY = Math.max(16, (h - totalH) / 2);
+          const cardsY = startY + titleFS + 20 + moneyFS + 20;
+
+          const cardW = Math.min(Math.round(380 * s), w - 24);
+          const cardX = w / 2 - cardW / 2;
+
+          for (let i = 0; i < upgradeKeys.length; i++) {
+            const cy = cardsY + i * (cardH + cardGap);
+            if (clickX >= cardX && clickX <= cardX + cardW && clickY >= cy && clickY <= cy + cardH) {
+              const newState = applyUpgrade(state, upgradeKeys[i]);
+              if (newState !== state) gameAudio.powerup();
+              stateRef.current = newState;
+              saveProgress(newState);
+              setForceUpdate(v => v + 1);
+              return;
+            }
+          }
+          const btnTop = cardsY + upgradeKeys.length * (cardH + cardGap);
+          if (clickY >= btnTop) stateRef.current = { ...state, screen: 'briefing' };
+        } else {
+          stateRef.current = { ...state, screen: 'briefing' };
+        }
+        break;
+      }
+      case 'multiplayerMenu': {
+        if (canvas && clickX !== undefined && clickY !== undefined) {
+          const w = canvas.width, h = canvas.height;
+          const layout = getMultiplayerMenuLayout(w, h);
+          for (let i = 0; i < 3; i++) {
+            const by = layout.startY + i * (layout.btnH + layout.btnGap);
+            if (clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW && clickY >= by && clickY <= by + layout.btnH) {
+              if (i === 0) {
+                // Host — create room via PeerJS
+                const mpState = createMultiplayerState('host');
+                stateRef.current = { ...state, screen: 'lobby', mp: mpState };
+                const net = new GameNetwork();
+                networkRef.current = net;
+                setupNetworkCallbacks(net);
+                net.createRoom().then(roomCode => {
+                  const s = stateRef.current;
+                  if (s.mp) {
+                    stateRef.current = { ...s, mp: { ...s.mp, roomCode } };
+                    setForceUpdate(v => v + 1);
+                  }
+                }).catch(err => {
+                  console.error('Failed to create room:', err);
+                });
+              } else if (i === 1) {
+                // Guest — enter room code
+                const mpState = createMultiplayerState('guest');
+                stateRef.current = { ...state, screen: 'lobby', mp: mpState };
+                networkRef.current = new GameNetwork();
+                setupNetworkCallbacks(networkRef.current);
+              } else {
+                // Back
+                stateRef.current = { ...state, screen: 'menu' };
+              }
+              break;
+            }
+          }
+        }
+        break;
+      }
+      case 'lobby': {
+        if (!canvas || clickX === undefined || clickY === undefined) break;
+        const mp = state.mp;
+        if (!mp) break;
+        const w = canvas.width, h = canvas.height;
+        const layout = getLobbyLayout(w, h);
+
+        // Back button (always at bottom)
+        if (clickY >= layout.backY && clickY <= layout.backY + layout.backBtnH &&
+            clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
+          networkRef.current?.destroy();
+          networkRef.current = null;
+          stateRef.current = createInitialStateWithSave();
+          break;
+        }
+
+        // Host waiting: copy room code button
+        if (mp.lobbyScreen === 'hostWaiting' && mp.roomCode) {
+          let y = Math.round(30 * layout.s) + layout.titleS + 20 + layout.textS + 20;
+          y += layout.smallS + 15; // label
+          y += Math.round(70 * layout.s) + 15; // room code display
+          const cpyH = Math.round(44 * layout.s);
+          if (clickY >= y && clickY <= y + cpyH &&
+              clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
+            navigator.clipboard?.writeText(mp.roomCode);
+            break;
+          }
+        }
+
+        // Guest: enter room code via prompt
+        if (mp.lobbyScreen === 'guestEnterCode') {
+          let y = Math.round(30 * layout.s) + layout.titleS + 20 + layout.textS + 20;
+          y += layout.smallS + 15;
+          if (clickY >= y && clickY <= y + layout.btnH &&
+              clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
+            const code = window.prompt('Введите код комнаты (6 символов):');
+            if (code && code.trim().length >= 4 && networkRef.current) {
+              networkRef.current.joinRoom(code.trim()).catch(err => {
+                console.error('Failed to join room:', err);
+                window.alert('Комната не найдена. Проверьте код.');
+              });
+            }
+            break;
+          }
+        }
+
+        // Mode select buttons (host only)
+        if ((mp.lobbyScreen === 'modeSelect' || mp.lobbyScreen === 'connected') && mp.netRole === 'host') {
+          let y = Math.round(30 * layout.s) + layout.titleS + 20 + layout.textS + 20;
+          if (mp.connected) y += layout.smallS + 15; // ping
+          y += layout.smallS + 15; // "Choose mode" label
+
+          const modes: MultiplayerMode[] = ['coopRescue', 'copsAndRobbers', 'demolitionDerby', 'patientRace'];
+          const modeBtnH = Math.round(52 * layout.s);
+          for (let i = 0; i < modes.length; i++) {
+            const by = y + i * (modeBtnH + layout.btnGap);
+            if (clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW && clickY >= by && clickY <= by + modeBtnH) {
+              stateRef.current = { ...state, mp: { ...mp, multiplayerMode: modes[i] } };
+              // Notify guest of mode selection
+              networkRef.current?.sendReliable({
+                type: 'modeSelect', seq: 0, ts: performance.now(), data: modes[i],
+              });
+              setForceUpdate(v => v + 1);
+              break;
+            }
+          }
+
+          // START button
+          const startY = y + modes.length * (modeBtnH + layout.btnGap) + 10;
+          if (clickY >= startY && clickY <= startY + layout.btnH &&
+              clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
+            // Start the multiplayer game!
+            startMultiplayerGame();
+          }
+        }
+
+        break;
+      }
+      case 'ending': {
+        stateRef.current = createInitialState();
+        break;
+      }
+    }
+    setForceUpdate(v => v + 1);
+  }, [initAudio]);
+
+  // Keyboard
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      initAudio();
+      const state = stateRef.current;
+      const keys = state.keys;
+      switch (e.key) {
+        case 'ArrowUp': case 'w': case 'W': case 'ц': case 'Ц': keys.up = true; e.preventDefault(); break;
+        case 'ArrowDown': case 's': case 'S': case 'ы': case 'Ы': keys.down = true; e.preventDefault(); break;
+        case 'ArrowLeft': case 'a': case 'A': case 'ф': case 'Ф': keys.left = true; e.preventDefault(); break;
+        case 'ArrowRight': case 'd': case 'D': case 'в': case 'В': keys.right = true; e.preventDefault(); break;
+        case ' ':
+          e.preventDefault();
+          if (state.screen === 'playing') keys.space = true;
+          else handleAction();
+          break;
+        case 'h': case 'H': case 'р': case 'Р': keys.honk = true; break;
+        case 'Escape':
+          e.preventDefault();
+          if (state.screen === 'playing' && state.mp?.disconnected) {
+            // Disconnected — Escape goes to menu
+            gameAudio.siren(false);
+            networkRef.current?.destroy();
+            networkRef.current = null;
+            stateRef.current = createInitialStateWithSave();
+            setForceUpdate(v => v + 1);
+          } else if (state.screen === 'playing') {
+            stateRef.current = { ...state, screen: 'paused' };
+            gameAudio.siren(false);
+            setForceUpdate(v => v + 1);
+          } else if (state.screen === 'paused') {
+            stateRef.current = { ...state, screen: 'playing' };
+            gameAudio.siren(true);
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        case 'm': case 'M': case 'ь': case 'Ь':
+          gameAudio.toggleMute();
+          break;
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const keys = stateRef.current.keys;
+      switch (e.key) {
+        case 'ArrowUp': case 'w': case 'W': case 'ц': case 'Ц': keys.up = false; break;
+        case 'ArrowDown': case 's': case 'S': case 'ы': case 'Ы': keys.down = false; break;
+        case 'ArrowLeft': case 'a': case 'A': case 'ф': case 'Ф': keys.left = false; break;
+        case 'ArrowRight': case 'd': case 'D': case 'в': case 'В': keys.right = false; break;
+        case ' ': keys.space = false; break;
+        case 'h': case 'H': case 'р': case 'Р': keys.honk = false; break;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
+  }, [handleAction, initAudio]);
+
+  // Touch
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const JOY_RADIUS = 60, JOY_DEAD = 10;
+
+    const handleTouchStart = (e: TouchEvent) => {
+      e.preventDefault();
+      initAudio();
+      const state = stateRef.current;
+
+      // Dismiss orientation hint
+      if (!orientationDismissedRef.current && isMobileRef.current && canvas.height > canvas.width * 1.1) {
+        orientationDismissedRef.current = true;
+        return;
+      }
+
+      if (state.screen !== 'playing') {
+        const rect = canvas.getBoundingClientRect();
+        const touch = e.changedTouches[0];
+        const x = (touch.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (touch.clientY - rect.top) * (canvas.height / rect.height);
+        handleAction(x, y);
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        const tx = touch.clientX - rect.left, ty = touch.clientY - rect.top;
+
+        // Check pause button (top-right corner)
+        if (tx > rect.width - 60 && ty < 60) {
+          stateRef.current = { ...state, screen: 'paused' };
+          gameAudio.siren(false);
+          setForceUpdate(v => v + 1);
+          return;
+        }
+
+        if (tx > rect.width * 0.6) {
+          if (ty < rect.height * 0.45) state.keys.space = true;
+          else state.keys.honk = true;
+        } else if (!joystickRef.current.active) {
+          joystickRef.current = { active: true, startX: tx, startY: ty, currentX: tx, currentY: ty, touchId: touch.identifier };
+        }
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      if (stateRef.current.screen !== 'playing') return;
+      const rect = canvas.getBoundingClientRect();
+      const joy = joystickRef.current;
+      const keys = stateRef.current.keys;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        if (joy.active && touch.identifier === joy.touchId) {
+          const tx = touch.clientX - rect.left, ty = touch.clientY - rect.top;
+          const dx = tx - joy.startX, dy = ty - joy.startY;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d > JOY_RADIUS) { joy.currentX = joy.startX + (dx / d) * JOY_RADIUS; joy.currentY = joy.startY + (dy / d) * JOY_RADIUS; }
+          else { joy.currentX = tx; joy.currentY = ty; }
+          const jdx = joy.currentX - joy.startX, jdy = joy.currentY - joy.startY;
+          keys.up = jdy < -JOY_DEAD; keys.down = jdy > JOY_DEAD;
+          keys.left = jdx < -JOY_DEAD; keys.right = jdx > JOY_DEAD;
+        }
+      }
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      e.preventDefault();
+      const keys = stateRef.current.keys;
+      const joy = joystickRef.current;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        if (joy.active && touch.identifier === joy.touchId) {
+          joy.active = false; joy.touchId = null;
+          keys.up = false; keys.down = false; keys.left = false; keys.right = false;
+        } else { keys.space = false; keys.honk = false; }
+      }
+    };
+
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+    canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+    canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+    return () => {
+      canvas.removeEventListener('touchstart', handleTouchStart);
+      canvas.removeEventListener('touchmove', handleTouchMove);
+      canvas.removeEventListener('touchend', handleTouchEnd);
+      canvas.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [handleAction, initAudio]);
+
+  // Joystick overlay + pause button
+  const drawJoystick = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    if (!isMobileRef.current) return;
+    const state = stateRef.current;
+    if (state.screen !== 'playing') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = w / rect.width, scaleY = h / rect.height;
+    const joy = joystickRef.current;
+    const isExtremal = state.gameMode === 'extremal';
+    const isRunner = state.gameMode === 'runner' || isExtremal;
+
+    // Pause button (top-right)
+    const pauseX = w - 35 * scaleX, pauseY = 35 * scaleY;
+    ctx.beginPath(); ctx.arc(pauseX, pauseY, 22 * scaleX, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `bold ${14 * scaleX}px Arial`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('⏸', pauseX, pauseY);
+
+    if (joy.active) {
+      const bx = joy.startX * scaleX, by = joy.startY * scaleY;
+      const kx = joy.currentX * scaleX, ky = joy.currentY * scaleY;
+      const r = 60 * scaleX;
+      ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(kx, ky);
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3; ctx.stroke();
+      ctx.beginPath(); ctx.arc(kx, ky, 20 * scaleX, 0, Math.PI * 2);
+      const grad = ctx.createRadialGradient(kx, ky, 0, kx, ky, 20 * scaleX);
+      grad.addColorStop(0, 'rgba(255,255,255,0.5)'); grad.addColorStop(1, 'rgba(255,255,255,0.15)');
+      ctx.fillStyle = grad; ctx.fill();
+    } else {
+      const hx = 80 * scaleX, hy = h - 110 * scaleY;
+      ctx.beginPath(); ctx.arc(hx, hy, 45 * scaleX, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.font = `${14 * scaleX}px Arial`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('▲', hx, hy - 22 * scaleY); ctx.fillText('▼', hx, hy + 22 * scaleY);
+      ctx.fillText('◄', hx - 22 * scaleX, hy); ctx.fillText('►', hx + 22 * scaleX, hy);
+    }
+
+    const btnSize = 44 * scaleX;
+
+    // Sprint button - higher up
+    const tbx = w - 75 * scaleX, tby = h - 210 * scaleY;
+    ctx.beginPath(); ctx.arc(tbx, tby, btnSize, 0, Math.PI * 2);
+    ctx.fillStyle = state.keys.space
+      ? (isRunner ? 'rgba(251,191,36,0.5)' : 'rgba(0,150,255,0.5)')
+      : (isRunner ? 'rgba(200,150,0,0.15)' : 'rgba(0,100,200,0.15)');
+    ctx.fill();
+    ctx.strokeStyle = isRunner ? 'rgba(251,191,36,0.4)' : 'rgba(0,150,255,0.4)';
+    ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.font = `bold ${18 * scaleX}px Arial`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(isRunner ? '⚡' : '📢', tbx, tby);
+    ctx.font = `${10 * scaleX}px Arial`; ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillText(isRunner ? 'СПРИНТ' : 'СИРЕНА', tbx, tby + btnSize + 12);
+
+    // Honk/Dash button - lower
+    const bbx = w - 75 * scaleX, bby = h - 80 * scaleY;
+    ctx.beginPath(); ctx.arc(bbx, bby, btnSize, 0, Math.PI * 2);
+    ctx.fillStyle = state.keys.honk
+      ? (isExtremal ? 'rgba(239,68,68,0.5)' : 'rgba(255,200,0,0.4)')
+      : (isExtremal ? 'rgba(150,0,0,0.15)' : 'rgba(200,150,0,0.1)');
+    ctx.fill();
+    ctx.strokeStyle = isExtremal ? 'rgba(239,68,68,0.3)' : 'rgba(255,200,0,0.3)';
+    ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.font = `bold ${18 * scaleX}px Arial`;
+    ctx.fillText(isExtremal ? '💀' : '📯', bbx, bby);
+    ctx.font = `${10 * scaleX}px Arial`; ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillText(isExtremal ? 'РЫВОК' : 'ГУДОК', bbx, bby + btnSize + 12);
+
+    ctx.textBaseline = 'alphabetic';
+  }, []);
+
+  // Game loop
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const resizeCanvas = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    const gameLoop = (timestamp: number) => {
+      if (!lastTimeRef.current) lastTimeRef.current = timestamp;
+      const elapsed = timestamp - lastTimeRef.current;
+      lastTimeRef.current = timestamp;
+      const dt = Math.min(elapsed / 1000, 0.05);
+
+      const prevScreen = stateRef.current.screen;
+      const isMP = !!stateRef.current.mp?.isMultiplayer;
+      const isHost = stateRef.current.mp?.netRole === 'host';
+      const isGuest = stateRef.current.mp?.netRole === 'guest';
+      const net = networkRef.current;
+
+      if (stateRef.current.screen === 'playing') {
+        // Stop simulation if multiplayer peer disconnected
+        const mpDisconnected = stateRef.current.mp?.disconnected;
+
+        if ((!isMP || isHost) && !mpDisconnected) {
+          // Solo or Host: run simulation
+          stateRef.current = updateGame(stateRef.current, dt);
+
+          // Host: send snapshot every 3rd frame + send guest keys to engine
+          if (isHost && net?.isConnected) {
+            snapshotFrameRef.current++;
+            if (snapshotFrameRef.current % 3 === 0) {
+              const snap = createSnapshot(stateRef.current);
+              const snapStr = serializeSnapshot(snap);
+              net.sendReliable({ type: 'snapshot', seq: 0, ts: performance.now(), data: snapStr });
+            }
+          }
+        } else if (isGuest && stateRef.current.mp && !mpDisconnected) {
+          // Guest: interpolate between snapshots, send keys
+          const mp = stateRef.current.mp;
+          if (net?.isConnected) {
+            net.sendKeys(serializeKeys(stateRef.current.keys));
+          }
+
+          // Interpolate
+          if (mp.prevSnapshot && mp.currSnapshot) {
+            const elapsed = performance.now() - mp.snapshotTime;
+            const snapInterval = 50; // ~20Hz = 50ms between snapshots
+            const t = Math.min(1.5, elapsed / snapInterval);
+            const interpolated = interpolateSnapshots(mp.prevSnapshot, mp.currSnapshot, t);
+            stateRef.current = applySnapshotToState(stateRef.current, interpolated);
+          } else if (mp.currSnapshot) {
+            stateRef.current = applySnapshotToState(stateRef.current, mp.currSnapshot);
+          }
+
+          // Increment time for rendering
+          stateRef.current = { ...stateRef.current, time: (stateRef.current.time || 0) + 1 };
+        }
+      }
+
+      // Process audio events
+      const audioEvents = stateRef.current.audioEvents;
+      if (audioEvents && audioEvents.length > 0) {
+        for (const ev of audioEvents) {
+          gameAudio.playEvent(ev);
+          // Haptic feedback
+          if (isMobileRef.current) {
+            if (ev === 'collision' || ev === 'hazardDamage') vibrate(50);
+            else if (ev === 'catch') vibrate([30, 20, 30]);
+            else if (ev === 'fail') vibrate([50, 30, 50, 30, 100]);
+            else if (ev === 'win') vibrate([30, 20, 30, 20, 30]);
+          }
+        }
+        stateRef.current = { ...stateRef.current, audioEvents: [] };
+      }
+
+      // Countdown beep
+      if (stateRef.current.screen === 'playing' && stateRef.current.timeLeft <= 5 && stateRef.current.timeLeft > 0) {
+        const sec = Math.ceil(stateRef.current.timeLeft);
+        if (sec !== lastCountdownRef.current) {
+          lastCountdownRef.current = sec;
+          gameAudio.countdown();
+        }
+      }
+
+      // Stop siren on screen change away from playing
+      if (prevScreen === 'playing' && stateRef.current.screen !== 'playing') {
+        gameAudio.siren(false);
+      }
+
+      const w = canvas.width, h = canvas.height;
+      const time = stateRef.current.time || Math.floor(timestamp / 16);
+      ctx.clearRect(0, 0, w, h);
+
+      switch (stateRef.current.screen) {
+        case 'menu': {
+          const hasSave = !!loadProgress();
+          renderMenu(ctx, w, h, time);
+          if (hasSave) {
+            const s = sfCalc(w, h);
+            ctx.fillStyle = 'rgba(34,197,94,0.8)';
+            ctx.font = `${Math.round(12 * s)}px Arial`;
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('💾 Прогресс сохранён', w / 2, 20);
+          }
+          break;
+        }
+        case 'briefing':
+          if (stateRef.current.gameMode === 'runner' || stateRef.current.gameMode === 'extremal')
+            renderRunnerBriefing(ctx, stateRef.current, w, h, time);
+          else renderBriefing(ctx, stateRef.current, w, h, time);
+          break;
+        case 'playing': {
+          render(ctx, stateRef.current);
+
+          // Speed lines effect
+          const entity = stateRef.current.gameMode === 'ambulance' ? stateRef.current.ambulance : stateRef.current.runner;
+          if (entity) {
+            const maxSpd = stateRef.current.gameMode === 'ambulance'
+              ? stateRef.current.ambulance.maxSpeed * (stateRef.current.ambulance.nitroTimer > 0 ? 1.6 : 1)
+              : 3.5 * 1.6 * 1.3;
+            renderSpeedLines(ctx, w, h, entity.speed, maxSpd, entity.angle, time);
+          }
+
+          // Tutorial hint
+          if (!stateRef.current.tutorialShown) {
+            renderTutorial(ctx, stateRef.current.gameMode, w, h, time);
+            if (time > 300) {
+              stateRef.current = { ...stateRef.current, tutorialShown: true };
+            }
+          }
+
+          drawJoystick(ctx, w, h);
+
+          // Multiplayer HUD
+          if (stateRef.current.mp?.isMultiplayer) {
+            drawMultiplayerHUD(ctx, stateRef.current, w, h, time);
+          }
+
+          // Transition overlay
+          renderTransition(ctx, stateRef.current.transitionAlpha, w, h);
+
+          // Orientation hint for mobile portrait
+          if (isMobileRef.current && !orientationDismissedRef.current && h > w * 1.3) {
+            renderOrientationHint(ctx, w, h);
+          }
+          break;
+        }
+        case 'paused': render(ctx, stateRef.current); renderPaused(ctx, w, h, time); break;
+        case 'saved': renderSaved(ctx, stateRef.current, w, h, time); break;
+        case 'failed': renderFailed(ctx, stateRef.current, w, h, time); break;
+        case 'upgrade': renderUpgrade(ctx, stateRef.current, w, h, time); break;
+        case 'ending': renderEnding(ctx, stateRef.current, w, h, time); break;
+        case 'multiplayerMenu': renderMultiplayerMenu(ctx, w, h, time); break;
+        case 'lobby': renderLobby(ctx, stateRef.current, w, h, time); break;
+      }
+      animRef.current = requestAnimationFrame(gameLoop);
+    };
+    animRef.current = requestAnimationFrame(gameLoop);
+    return () => { cancelAnimationFrame(animRef.current); window.removeEventListener('resize', resizeCanvas); };
+  }, [drawJoystick]);
+
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || isMobileRef.current) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    handleAction(x, y);
+  }, [handleAction]);
+
+  return (
+    <div className="w-screen h-screen overflow-hidden bg-black select-none">
+      <canvas ref={canvasRef} className="block w-full h-full" onClick={handleCanvasClick} style={{ touchAction: 'none' }} />
+    </div>
+  );
+}
