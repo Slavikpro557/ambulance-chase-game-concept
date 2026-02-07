@@ -1679,20 +1679,97 @@ export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: 
     y += textS + 15;
   }
 
-  // Guest: enter room code
+  // Guest: Canvas-based code input with on-screen keyboard
   if (mp.lobbyScreen === 'guestEnterCode') {
     ctx.fillStyle = '#94a3b8'; ctx.font = `${smallS}px Arial`;
-    ctx.fillText('Нажмите кнопку и введите код комнаты:', w / 2, y);
+    ctx.fillText('Введите код комнаты:', w / 2, y);
     y += smallS + 15;
 
-    // Enter code button
-    const enterBtnH = Math.round(56 * s);
-    const pulse = 0.8 + Math.sin(time * 0.08) * 0.2;
-    ctx.fillStyle = `rgba(59,130,246,${pulse})`;
-    ctx.beginPath(); ctx.roundRect(btnX, y, btnW, enterBtnH, 12); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(16 * s)}px Arial`;
-    ctx.fillText('🔗 ВВЕСТИ КОД КОМНАТЫ', w / 2, y + enterBtnH / 2);
-    y += enterBtnH + 15;
+    // 6 input boxes
+    const boxSize = Math.round(44 * s);
+    const boxGap = Math.round(8 * s);
+    const totalBoxW = 6 * boxSize + 5 * boxGap;
+    const boxStartX = w / 2 - totalBoxW / 2;
+    const inputCode = mp.inputCode || '';
+
+    for (let i = 0; i < 6; i++) {
+      const bx = boxStartX + i * (boxSize + boxGap);
+      // Active box blinks
+      const isActive = i === inputCode.length;
+      ctx.fillStyle = isActive ? 'rgba(59,130,246,0.3)' : 'rgba(30,41,59,0.9)';
+      ctx.beginPath(); ctx.roundRect(bx, y, boxSize, boxSize, 8); ctx.fill();
+      ctx.strokeStyle = isActive ? '#60a5fa' : '#475569';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.stroke();
+
+      if (i < inputCode.length) {
+        ctx.fillStyle = '#34d399'; ctx.font = `bold ${Math.round(26 * s)}px monospace`;
+        ctx.fillText(inputCode[i], bx + boxSize / 2, y + boxSize / 2);
+      } else if (isActive) {
+        // Blinking cursor
+        if (Math.floor(time * 0.06) % 2 === 0) {
+          ctx.fillStyle = '#60a5fa';
+          ctx.fillRect(bx + boxSize / 2 - 1, y + boxSize * 0.25, 2, boxSize * 0.5);
+        }
+      }
+    }
+    y += boxSize + 15;
+
+    // Backspace button
+    if (inputCode.length > 0) {
+      const backBtnW = Math.round(60 * s);
+      const backBtnH = Math.round(38 * s);
+      const backBtnX = w / 2 + totalBoxW / 2 - backBtnW;
+      ctx.fillStyle = 'rgba(239,68,68,0.6)';
+      ctx.beginPath(); ctx.roundRect(backBtnX, y, backBtnW, backBtnH, 6); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+      ctx.fillText('⌫', backBtnX + backBtnW / 2, y + backBtnH / 2);
+    }
+    y += Math.round(38 * s) + 12;
+
+    // On-screen keyboard
+    const kbChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const kbCols = 8;
+    const kbRows = Math.ceil(kbChars.length / kbCols);
+    const kbBtnS = Math.round(38 * s);
+    const kbGap = Math.round(6 * s);
+    const kbTotalW = kbCols * kbBtnS + (kbCols - 1) * kbGap;
+    const kbStartX = w / 2 - kbTotalW / 2;
+
+    for (let r = 0; r < kbRows; r++) {
+      for (let c = 0; c < kbCols; c++) {
+        const idx = r * kbCols + c;
+        if (idx >= kbChars.length) break;
+        const bx = kbStartX + c * (kbBtnS + kbGap);
+        const by = y + r * (kbBtnS + kbGap);
+        ctx.fillStyle = inputCode.length >= 6 ? 'rgba(51,65,85,0.3)' : 'rgba(51,65,85,0.8)';
+        ctx.beginPath(); ctx.roundRect(bx, by, kbBtnS, kbBtnS, 6); ctx.fill();
+        ctx.fillStyle = inputCode.length >= 6 ? 'rgba(255,255,255,0.3)' : '#e2e8f0';
+        ctx.font = `bold ${Math.round(16 * s)}px monospace`;
+        ctx.fillText(kbChars[idx], bx + kbBtnS / 2, by + kbBtnS / 2);
+      }
+    }
+    y += kbRows * (kbBtnS + kbGap) + 10;
+
+    // Error message
+    if (mp.inputError) {
+      ctx.fillStyle = '#ef4444'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+      ctx.fillText(mp.inputError, w / 2, y);
+      y += Math.round(18 * s);
+    }
+
+    // Status: connecting
+    if (inputCode.length === 6) {
+      const dots = '.'.repeat(1 + Math.floor(time * 0.05) % 3);
+      ctx.fillStyle = '#fbbf24'; ctx.font = `${textS}px Arial`;
+      ctx.fillText(`Подключение${dots}`, w / 2, y);
+      y += textS + 10;
+    }
+
+    // Hint for desktop
+    ctx.fillStyle = '#64748b'; ctx.font = `${Math.round(11 * s)}px Arial`;
+    ctx.fillText('или набирайте на клавиатуре', w / 2, y);
+    y += Math.round(15 * s);
   }
 
   // Mode select (host only when connected)

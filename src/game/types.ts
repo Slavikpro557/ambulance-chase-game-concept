@@ -246,6 +246,8 @@ export interface MultiplayerState {
   runner2: RunnerPlayer | null;
   scores: [number, number];
   roomCode: string;
+  inputCode: string; // guest typing room code on canvas
+  inputError: string; // error message for guest
   ping: number;
   connected: boolean;
   // Snapshot interpolation (guest only)

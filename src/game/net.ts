@@ -14,6 +14,29 @@ function generateRoomCode(): string {
   return code;
 }
 
+// ICE servers for NAT traversal (STUN + free TURN)
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  // Free TURN servers (metered.ca free tier)
+  {
+    urls: 'turn:a.relay.metered.ca:80',
+    username: 'e8dd65c092cdd4e780cfab69',
+    credential: 'uWdWNmkhvyqTEMQm',
+  },
+  {
+    urls: 'turn:a.relay.metered.ca:443',
+    username: 'e8dd65c092cdd4e780cfab69',
+    credential: 'uWdWNmkhvyqTEMQm',
+  },
+  {
+    urls: 'turn:a.relay.metered.ca:443?transport=tcp',
+    username: 'e8dd65c092cdd4e780cfab69',
+    credential: 'uWdWNmkhvyqTEMQm',
+  },
+];
+
 export type NetMessageType =
   | 'keys'        // guest→host: input each frame (1 byte)
   | 'snapshot'    // host→guest: state snapshot (~300 bytes, 20Hz)
@@ -33,6 +56,14 @@ export interface NetMessage {
 }
 
 export type ConnectionState = 'idle' | 'offering' | 'answering' | 'connecting' | 'connected' | 'disconnected';
+
+// Try to get the underlying RTCPeerConnection from a PeerJS DataConnection
+function getPeerConnection(conn: DataConnection): RTCPeerConnection | null {
+  // PeerJS >=1.5: conn.peerConnection
+  // Some versions: conn._peerConnection or conn.pc
+  const c = conn as any;
+  return c.peerConnection || c._peerConnection || c.pc || null;
+}
 
 export class GameNetwork {
   private peer: Peer | null = null;
@@ -63,9 +94,8 @@ export class GameNetwork {
 
     return new Promise<string>((resolve, reject) => {
       this.peer = new Peer(peerId, {
-        config: {
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        }
+        config: { iceServers: ICE_SERVERS },
+        debug: 0, // 0=none, 1=errors, 2=warnings, 3=all
       });
 
       this.peer.on('open', () => {
@@ -74,7 +104,6 @@ export class GameNetwork {
 
       this.peer.on('error', (err: any) => {
         if (err.type === 'unavailable-id') {
-          // Room code collision — retry with new code
           this.peer?.destroy();
           this.peer = null;
           this.createRoom().then(resolve).catch(reject);
@@ -84,7 +113,6 @@ export class GameNetwork {
         reject(err);
       });
 
-      // When guest connects
       this.peer.on('connection', (conn: DataConnection) => {
         this.handleConnection(conn, true);
       });
@@ -99,16 +127,13 @@ export class GameNetwork {
 
     return new Promise<void>((resolve, reject) => {
       this.peer = new Peer({
-        config: {
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        }
+        config: { iceServers: ICE_SERVERS },
+        debug: 0,
       });
 
       this.peer.on('open', () => {
-        const conn = this.peer!.connect(peerId, {
-          reliable: true,
-          serialization: 'none', // we handle serialization ourselves
-        });
+        // Connect to host — use default serialization (binary)
+        const conn = this.peer!.connect(peerId, { reliable: true });
         this.handleConnection(conn, false);
         resolve();
       });
@@ -116,7 +141,7 @@ export class GameNetwork {
       this.peer.on('error', (err: any) => {
         if (err.type === 'peer-unavailable') {
           this.setState('disconnected');
-          reject(new Error('Комната не найдена. Проверьте код.'));
+          reject(new Error('Комната не найдена'));
           return;
         }
         this.setState('disconnected');
@@ -134,36 +159,42 @@ export class GameNetwork {
       this.reliableOpen = true;
       this.setupReliableChannel(conn);
 
-      // Access the underlying RTCPeerConnection for unreliable channel
-      const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
+      // Try to get underlying RTCPeerConnection for unreliable channel
+      const pc = getPeerConnection(conn);
       if (!pc) {
-        // Fallback: if peerConnection not accessible, use reliable for everything
+        // Can't access peerConnection — use reliable for everything
         this.setState('connected');
         this.startPing();
         return;
       }
 
       if (isHost) {
-        // Host creates unreliable channel (in-band SCTP negotiation)
-        const unreliable = pc.createDataChannel('unreliable', {
-          ordered: false,
-          maxRetransmits: 0,
-        });
-        this.setupUnreliableChannel(unreliable);
+        // Host creates unreliable channel after reliable is open
+        try {
+          const unreliable = pc.createDataChannel('game-unreliable', {
+            ordered: false,
+            maxRetransmits: 0,
+          });
+          this.setupUnreliableChannel(unreliable);
+        } catch {
+          // If createDataChannel fails, connect without unreliable
+          this.setState('connected');
+          this.startPing();
+        }
       } else {
         // Guest listens for unreliable channel from host
         pc.ondatachannel = (e) => {
-          if (e.channel.label === 'unreliable') {
+          if (e.channel.label === 'game-unreliable') {
             this.setupUnreliableChannel(e.channel);
           }
         };
-        // Fallback: if unreliable channel doesn't arrive within 3s, connect without it
+        // Fallback: if unreliable doesn't arrive within 2s, connect without it
         setTimeout(() => {
-          if (!this.unreliableChannel && this.reliableOpen) {
+          if (!this.unreliableChannel && this.reliableOpen && this.state !== 'connected') {
             this.setState('connected');
             this.startPing();
           }
-        }, 3000);
+        }, 2000);
       }
     });
 
@@ -182,7 +213,18 @@ export class GameNetwork {
   private setupReliableChannel(conn: DataConnection) {
     conn.on('data', (rawData: unknown) => {
       try {
-        const str = typeof rawData === 'string' ? rawData : String(rawData);
+        // PeerJS can deliver data as string, ArrayBuffer, or object depending on serialization
+        let str: string;
+        if (typeof rawData === 'string') {
+          str = rawData;
+        } else if (rawData instanceof ArrayBuffer) {
+          str = new TextDecoder().decode(rawData);
+        } else if (rawData instanceof Uint8Array) {
+          str = new TextDecoder().decode(rawData);
+        } else {
+          // Object — PeerJS default serialization might deserialize for us
+          str = JSON.stringify(rawData);
+        }
         const msg: NetMessage = JSON.parse(str);
         if (msg.type === 'pong') {
           this.ping = Math.round((performance.now() - this.lastPingSent) / 2);
@@ -206,7 +248,6 @@ export class GameNetwork {
       this.checkBothChannelsOpen();
     };
 
-    // If channel is already open
     if (channel.readyState === 'open') {
       this.unreliableChannel = channel;
       this.checkBothChannelsOpen();
@@ -254,7 +295,6 @@ export class GameNetwork {
   }
 
   sendUnreliable(msg: NetMessage) {
-    // Fallback to reliable if unreliable not available
     if (this.unreliableChannel?.readyState === 'open') {
       try { this.unreliableChannel.send(JSON.stringify(msg)); } catch { /* */ }
     } else {
@@ -266,9 +306,11 @@ export class GameNetwork {
     if (this.unreliableChannel?.readyState === 'open') {
       try { this.unreliableChannel.send(data.buffer); } catch { /* */ }
     } else if (this.dataConn?.open) {
-      // Fallback: send as base64 on reliable channel
+      // Fallback: send binary as base64 string on reliable channel
       try {
-        const b64 = btoa(String.fromCharCode(...data));
+        const bytes: number[] = [];
+        data.forEach(b => bytes.push(b));
+        const b64 = btoa(String.fromCharCode(...bytes));
         this.dataConn.send(JSON.stringify({ type: 'binary', seq: this.seq++, ts: performance.now(), data: b64 }));
       } catch { /* */ }
     }

@@ -35,6 +35,8 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
     runner2: null,
     scores: [0, 0],
     roomCode: '',
+    inputCode: '',
+    inputError: '',
     ping: 0,
     connected: false,
     prevSnapshot: null,
@@ -512,26 +514,86 @@ export function App() {
           const cpyH = Math.round(44 * layout.s);
           if (clickY >= y && clickY <= y + cpyH &&
               clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
-            navigator.clipboard?.writeText(mp.roomCode);
+            // Mobile-friendly clipboard fallback
+            try {
+              if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(mp.roomCode).catch(() => {});
+              } else {
+                const ta = document.createElement('textarea');
+                ta.value = mp.roomCode;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+              }
+            } catch { /* ignore */ }
             break;
           }
         }
 
-        // Guest: enter room code via prompt
+        // Guest: Canvas-based room code input
         if (mp.lobbyScreen === 'guestEnterCode') {
           let y = Math.round(30 * layout.s) + layout.titleS + 20 + layout.textS + 20;
           y += layout.smallS + 15;
-          if (clickY >= y && clickY <= y + layout.btnH &&
-              clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
-            const code = window.prompt('Введите код комнаты (6 символов):');
-            if (code && code.trim().length >= 4 && networkRef.current) {
-              networkRef.current.joinRoom(code.trim()).catch(err => {
-                console.error('Failed to join room:', err);
-                window.alert('Комната не найдена. Проверьте код.');
-              });
-            }
+          // Code input boxes area
+          const boxSize = Math.round(44 * layout.s);
+          const boxGap = Math.round(8 * layout.s);
+          const totalBoxW = 6 * boxSize + 5 * boxGap;
+          const boxStartX = w / 2 - totalBoxW / 2;
+          y += boxSize + 15; // skip past boxes
+
+          // Backspace button
+          const backBtnW = Math.round(60 * layout.s);
+          const backBtnH = Math.round(38 * layout.s);
+          const backBtnX = w / 2 + totalBoxW / 2 - backBtnW;
+          if (mp.inputCode.length > 0 &&
+              clickX >= backBtnX && clickX <= backBtnX + backBtnW &&
+              clickY >= y && clickY <= y + backBtnH) {
+            stateRef.current = { ...state, mp: { ...mp, inputCode: mp.inputCode.slice(0, -1), inputError: '' } };
+            setForceUpdate(v => v + 1);
             break;
           }
+          y += backBtnH + 12;
+
+          // On-screen keyboard (4 rows of 8 chars)
+          const kbChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+          const kbCols = 8;
+          const kbRows = Math.ceil(kbChars.length / kbCols);
+          const kbBtnS = Math.round(38 * layout.s);
+          const kbGap = Math.round(6 * layout.s);
+          const kbTotalW = kbCols * kbBtnS + (kbCols - 1) * kbGap;
+          const kbStartX = w / 2 - kbTotalW / 2;
+
+          for (let r = 0; r < kbRows; r++) {
+            for (let c = 0; c < kbCols; c++) {
+              const idx = r * kbCols + c;
+              if (idx >= kbChars.length) break;
+              const bx = kbStartX + c * (kbBtnS + kbGap);
+              const by = y + r * (kbBtnS + kbGap);
+              if (clickX >= bx && clickX <= bx + kbBtnS && clickY >= by && clickY <= by + kbBtnS) {
+                if (mp.inputCode.length < 6) {
+                  const newCode = mp.inputCode + kbChars[idx];
+                  stateRef.current = { ...state, mp: { ...mp, inputCode: newCode, inputError: '' } };
+                  setForceUpdate(v => v + 1);
+                  // Auto-connect when 6 chars entered
+                  if (newCode.length === 6 && networkRef.current) {
+                    networkRef.current.joinRoom(newCode).catch(() => {
+                      const s2 = stateRef.current;
+                      if (s2.mp) {
+                        stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: 'Комната не найдена' } };
+                        setForceUpdate(v => v + 1);
+                      }
+                    });
+                  }
+                }
+                break;
+              }
+            }
+          }
+          break;
         }
 
         // Mode select buttons (host only)
@@ -579,6 +641,44 @@ export function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       initAudio();
       const state = stateRef.current;
+
+      // Lobby: typing room code (desktop keyboard)
+      if (state.screen === 'lobby' && state.mp?.lobbyScreen === 'guestEnterCode') {
+        const validChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const ch = e.key.toUpperCase();
+        if (ch === 'BACKSPACE' && state.mp.inputCode.length > 0) {
+          e.preventDefault();
+          stateRef.current = { ...state, mp: { ...state.mp, inputCode: state.mp.inputCode.slice(0, -1), inputError: '' } };
+          setForceUpdate(v => v + 1);
+          return;
+        }
+        if (ch.length === 1 && validChars.includes(ch) && state.mp.inputCode.length < 6) {
+          e.preventDefault();
+          const newCode = state.mp.inputCode + ch;
+          stateRef.current = { ...state, mp: { ...state.mp, inputCode: newCode, inputError: '' } };
+          setForceUpdate(v => v + 1);
+          // Auto-connect at 6 chars
+          if (newCode.length === 6 && networkRef.current) {
+            networkRef.current.joinRoom(newCode).catch(() => {
+              const s2 = stateRef.current;
+              if (s2.mp) {
+                stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: '', inputError: 'Комната не найдена' } };
+                setForceUpdate(v => v + 1);
+              }
+            });
+          }
+          return;
+        }
+        if (ch === 'ESCAPE') {
+          networkRef.current?.destroy();
+          networkRef.current = null;
+          stateRef.current = createInitialStateWithSave();
+          setForceUpdate(v => v + 1);
+          return;
+        }
+        return; // don't process game keys while typing
+      }
+
       const keys = state.keys;
       switch (e.key) {
         case 'ArrowUp': case 'w': case 'W': case 'ц': case 'Ц': keys.up = true; e.preventDefault(); break;
