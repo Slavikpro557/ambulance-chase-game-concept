@@ -942,6 +942,7 @@ export function App() {
       lastTimeRef.current = timestamp;
       const dt = Math.min(elapsed / 1000, 0.05);
 
+      const prevScreen = stateRef.current.screen;
       const isMP = !!stateRef.current.mp?.isMultiplayer;
       const isHost = stateRef.current.mp?.netRole === 'host';
       const isGuest = stateRef.current.mp?.netRole === 'guest';
@@ -952,7 +953,6 @@ export function App() {
         const mpDisconnected = stateRef.current.mp?.disconnected;
 
         if ((!isMP || isHost) && !mpDisconnected) {
-          const prevScreen = stateRef.current.screen;
           // Solo or Host: run simulation
           stateRef.current = updateGame(stateRef.current, dt);
 
