@@ -266,6 +266,11 @@ export interface MultiplayerState {
   // Rematch
   rematchRequested: boolean;
   remoteRematchRequested: boolean;
+  // Campaign progression (each player has own upgrades/money)
+  guestUpgrades: Upgrades;
+  guestMoney: number;
+  hostReady: boolean;
+  guestReady: boolean;
 }
 
 export interface FullSyncPayload {

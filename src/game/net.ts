@@ -67,15 +67,19 @@ async function fetchTurnServers(): Promise<RTCIceServer[]> {
 }
 
 export type NetMessageType =
-  | 'keys'        // guest→host: input each frame
-  | 'snapshot'    // host→guest: state snapshot
-  | 'fullSync'    // host→guest: full game state at mission start
-  | 'start'       // host→guest: game is starting
-  | 'ping'        // both: latency measurement
-  | 'pong'        // both: latency response
-  | 'modeSelect'  // host→guest: selected multiplayer mode
-  | 'rematch'     // both: request rematch
-  | 'chat';       // both: lobby chat message
+  | 'keys'           // guest→host: input each frame
+  | 'snapshot'       // host→guest: state snapshot
+  | 'fullSync'       // host→guest: full game state at mission start
+  | 'start'          // host→guest: game is starting
+  | 'ping'           // both: latency measurement
+  | 'pong'           // both: latency response
+  | 'modeSelect'     // host→guest: selected multiplayer mode
+  | 'rematch'        // both: request rematch
+  | 'chat'           // both: lobby chat message
+  | 'briefing'       // host→guest: show briefing for mission N
+  | 'upgrade'        // host→guest: show upgrade screen with data
+  | 'upgradeChoice'  // guest→host: guest selected an upgrade
+  | 'ready';         // both: player is ready (briefing/upgrade)
 
 export interface NetMessage {
   type: NetMessageType;

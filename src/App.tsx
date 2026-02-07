@@ -50,6 +50,10 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
     roundEndTime: 0,
     rematchRequested: false,
     remoteRematchRequested: false,
+    guestUpgrades: { engine: 0, tires: 0, siren: 0, armor: 0 },
+    guestMoney: 0,
+    hostReady: false,
+    guestReady: false,
   };
 }
 
@@ -185,6 +189,87 @@ export function App() {
           }
           break;
         }
+        case 'briefing': {
+          // Guest: host sent briefing → show briefing screen
+          if (s.mp.netRole === 'guest') {
+            const d = msg.data as { missionIndex: number };
+            stateRef.current = {
+              ...s,
+              screen: 'briefing',
+              missionIndex: d.missionIndex,
+              mp: { ...s.mp, hostReady: false, guestReady: false },
+            };
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+        case 'upgrade': {
+          // Guest: host sent upgrade screen data
+          if (s.mp.netRole === 'guest') {
+            const d = msg.data as { missionIndex: number; guestMoney: number; guestUpgrades: import('./game/types').Upgrades };
+            stateRef.current = {
+              ...s,
+              screen: 'upgrade',
+              missionIndex: d.missionIndex,
+              // Guest uses their own money/upgrades stored on host and synced here
+              money: d.guestMoney,
+              upgrades: d.guestUpgrades,
+              mp: { ...s.mp, hostReady: false, guestReady: false, guestMoney: d.guestMoney, guestUpgrades: d.guestUpgrades },
+            };
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+        case 'upgradeChoice': {
+          // Host: guest selected an upgrade
+          if (s.mp.netRole === 'host' && s.mp) {
+            const upgradeKey = msg.data as keyof import('./game/types').Upgrades;
+            const gu = { ...s.mp.guestUpgrades };
+            const level = gu[upgradeKey];
+            const cost = (level + 1) * 100;
+            if (level < 3 && s.mp.guestMoney >= cost) {
+              gu[upgradeKey] = level + 1;
+              const newGuestMoney = s.mp.guestMoney - cost;
+              stateRef.current = {
+                ...s,
+                mp: { ...s.mp, guestUpgrades: gu, guestMoney: newGuestMoney },
+              };
+              // Confirm update back to guest
+              networkRef.current?.sendReliable({
+                type: 'upgrade', seq: 0, ts: performance.now(),
+                data: { missionIndex: s.missionIndex, guestMoney: newGuestMoney, guestUpgrades: gu },
+              });
+              setForceUpdate(v => v + 1);
+            }
+          }
+          break;
+        }
+        case 'ready': {
+          // Remote player is ready (on briefing or upgrade screen)
+          if (s.mp) {
+            const isRemoteHost = s.mp.netRole === 'guest'; // if we're guest, remote is host
+            let newMp: typeof s.mp;
+            if (isRemoteHost) {
+              newMp = { ...s.mp, hostReady: true };
+            } else {
+              newMp = { ...s.mp, guestReady: true };
+            }
+            stateRef.current = { ...s, mp: newMp };
+
+            // Host: if on upgrade screen and both ready → go to briefing
+            if (s.mp.netRole === 'host' && s.screen === 'upgrade' && newMp.hostReady && newMp.guestReady) {
+              stateRef.current = {
+                ...stateRef.current,
+                screen: 'briefing',
+                mp: { ...newMp, hostReady: false, guestReady: false },
+              };
+              const net2 = networkRef.current;
+              net2?.sendReliable({ type: 'briefing', seq: 0, ts: performance.now(), data: { missionIndex: s.missionIndex } });
+            }
+            setForceUpdate(v => v + 1);
+          }
+          break;
+        }
       }
     };
 
@@ -237,12 +322,18 @@ export function App() {
       return;
     }
 
-    // Create second ambulance or runner for MP
+    // Create second ambulance or runner for MP (apply guest upgrades)
     if (mode === 'coopRescue' || mode === 'demolitionDerby' || mode === 'patientRace') {
+      const gu = s.mp.guestUpgrades;
       const amb2 = { ...newState.ambulance };
       amb2.x += 80;
       amb2.y += 80;
       amb2.angle = 0;
+      // Apply guest's own upgrades to amb2
+      amb2.maxSpeed = 5 + gu.engine * 1.2;
+      amb2.acceleration = 0.4 + gu.engine * 0.1;
+      amb2.handling = 0.92 + gu.tires * 0.015;
+      amb2.health = 100 + gu.armor * 25;
       newState.mp = { ...s.mp, ambulance2: amb2, scores: [0, 0] };
     } else if (mode === 'copsAndRobbers') {
       // P2 is a runner
@@ -358,12 +449,21 @@ export function App() {
         break;
       }
       case 'briefing': {
-        if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
-          stateRef.current = startRunnerLevel(state);
+        if (state.mp?.isMultiplayer) {
+          // Multiplayer: only host can start from briefing
+          if (state.mp.netRole === 'host') {
+            startMultiplayerGame(state.missionIndex);
+          }
+          // Guest: do nothing on click (waits for host)
         } else {
-          stateRef.current = startMission(state, state.missionIndex);
+          // Solo mode
+          if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
+            stateRef.current = startRunnerLevel(state);
+          } else {
+            stateRef.current = startMission(state, state.missionIndex);
+          }
+          gameAudio.siren(true);
         }
-        gameAudio.siren(true);
         break;
       }
       case 'paused': {
@@ -476,17 +576,49 @@ export function App() {
           for (let i = 0; i < upgradeKeys.length; i++) {
             const cy = cardsY + i * (cardH + cardGap);
             if (clickX >= cardX && clickX <= cardX + cardW && clickY >= cy && clickY <= cy + cardH) {
-              const newState = applyUpgrade(state, upgradeKeys[i]);
-              if (newState !== state) gameAudio.powerup();
-              stateRef.current = newState;
-              saveProgress(newState);
+              if (state.mp?.isMultiplayer && state.mp.netRole === 'guest') {
+                // Guest: send upgrade choice to host
+                networkRef.current?.sendReliable({
+                  type: 'upgradeChoice', seq: 0, ts: performance.now(), data: upgradeKeys[i],
+                });
+                gameAudio.powerup();
+              } else {
+                // Solo or Host: apply upgrade locally
+                const newState = applyUpgrade(state, upgradeKeys[i]);
+                if (newState !== state) gameAudio.powerup();
+                stateRef.current = newState;
+                if (!state.mp) saveProgress(newState);
+              }
               setForceUpdate(v => v + 1);
               return;
             }
           }
+          // "ПРОДОЛЖИТЬ" / "ГОТОВ" button
           const btnTop = cardsY + upgradeKeys.length * (cardH + cardGap);
-          if (clickY >= btnTop) stateRef.current = { ...state, screen: 'briefing' };
-        } else {
+          if (clickY >= btnTop) {
+            if (state.mp?.isMultiplayer) {
+              // Multiplayer: mark self as ready
+              const mp = state.mp;
+              const net = networkRef.current;
+              if (mp.netRole === 'host') {
+                stateRef.current = { ...state, mp: { ...mp, hostReady: true } };
+                net?.sendReliable({ type: 'ready', seq: 0, ts: performance.now(), data: null });
+                // If both ready → go to briefing
+                if (mp.guestReady) {
+                  stateRef.current = { ...stateRef.current, screen: 'briefing', mp: { ...stateRef.current.mp!, hostReady: false, guestReady: false } };
+                  net?.sendReliable({ type: 'briefing', seq: 0, ts: performance.now(), data: { missionIndex: state.missionIndex } });
+                }
+              } else {
+                stateRef.current = { ...state, mp: { ...mp, guestReady: true } };
+                net?.sendReliable({ type: 'ready', seq: 0, ts: performance.now(), data: null });
+                // If both ready → host will transition (guest just waits)
+              }
+              setForceUpdate(v => v + 1);
+            } else {
+              stateRef.current = { ...state, screen: 'briefing' };
+            }
+          }
+        } else if (!state.mp) {
           stateRef.current = { ...state, screen: 'briefing' };
         }
         break;
@@ -666,12 +798,22 @@ export function App() {
             }
           }
 
-          // START button
+          // START button → go to briefing (not directly to game)
           const startY = y + modes.length * (modeBtnH + layout.btnGap) + 10;
           if (clickY >= startY && clickY <= startY + layout.btnH &&
               clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
-            // Start the multiplayer game!
-            startMultiplayerGame();
+            // Go to briefing screen, notify guest
+            stateRef.current = {
+              ...state,
+              screen: 'briefing',
+              missionIndex: state.missionIndex || 0,
+              mp: { ...mp, hostReady: false, guestReady: false },
+            };
+            networkRef.current?.sendReliable({
+              type: 'briefing', seq: 0, ts: performance.now(),
+              data: { missionIndex: state.missionIndex || 0 },
+            });
+            setForceUpdate(v => v + 1);
           }
         }
 
@@ -982,7 +1124,19 @@ export function App() {
 
         if ((!isMP || isHost) && !mpDisconnected) {
           // Solo or Host: run simulation
+          const prevMoney = stateRef.current.money;
           stateRef.current = updateGame(stateRef.current, dt);
+
+          // Host MP: mirror money gains to guest
+          if (isHost && stateRef.current.mp) {
+            const moneyDelta = stateRef.current.money - prevMoney;
+            if (moneyDelta > 0) {
+              stateRef.current = {
+                ...stateRef.current,
+                mp: { ...stateRef.current.mp, guestMoney: stateRef.current.mp.guestMoney + moneyDelta },
+              };
+            }
+          }
 
           // Host: notify guest of round end so they see saved/failed screen too
           if (isHost && net?.isConnected && prevScreen === 'playing' && stateRef.current.screen !== 'playing') {
@@ -1025,7 +1179,7 @@ export function App() {
         }
       }
 
-      // Multiplayer: auto-restart after saved/failed (3 sec)
+      // Multiplayer campaign: auto-transition after saved/failed (3 sec)
       if (isMP && (stateRef.current.screen === 'saved' || stateRef.current.screen === 'failed')) {
         if (!stateRef.current.mp?.roundEndTime) {
           stateRef.current = {
@@ -1034,21 +1188,53 @@ export function App() {
           };
         } else if (performance.now() - stateRef.current.mp.roundEndTime > 3000) {
           gameAudio.siren(false);
-          // Host: auto-start next round
           if (isHost && net?.isConnected) {
             const wasSaved = stateRef.current.screen === 'saved';
             const currentMission = stateRef.current.missionIndex;
-            // Saved = advance to next mission; Failed = retry same mission
-            const nextMission = wasSaved ? currentMission + 1 : currentMission;
-            stateRef.current = {
-              ...stateRef.current,
-              missionIndex: nextMission,
-              mp: { ...stateRef.current.mp!, roundEndTime: 0 },
-            };
-            startMultiplayerGame(nextMission);
-          } else if (isGuest) {
-            // Guest: just wait — host will send fullSync + start
+            const mp = stateRef.current.mp!;
+
+            if (wasSaved) {
+              // Success → advance mission index and go to UPGRADE screen
+              const nextMission = currentMission + 1;
+              // Check if all missions done
+              if (nextMission >= MISSIONS.length) {
+                // Victory!
+                stateRef.current = {
+                  ...stateRef.current,
+                  screen: 'lobby',
+                  missionIndex: 0,
+                  mp: { ...mp, lobbyScreen: 'modeSelect', roundEndTime: 0 },
+                };
+                stateRef.current.flashMessages.push({ text: '🏆 Все миссии пройдены! Победа!', timer: 300, color: '#fbbf24' });
+                net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { victory: true } });
+              } else {
+                // Go to upgrade screen
+                stateRef.current = {
+                  ...stateRef.current,
+                  screen: 'upgrade',
+                  missionIndex: nextMission,
+                  mp: { ...mp, roundEndTime: 0, hostReady: false, guestReady: false },
+                };
+                net.sendReliable({
+                  type: 'upgrade', seq: 0, ts: performance.now(),
+                  data: { missionIndex: nextMission, guestMoney: mp.guestMoney, guestUpgrades: mp.guestUpgrades },
+                });
+              }
+            } else {
+              // Failed → go to BRIEFING for same mission (retry)
+              stateRef.current = {
+                ...stateRef.current,
+                screen: 'briefing',
+                mp: { ...mp, roundEndTime: 0, hostReady: false, guestReady: false },
+              };
+              net.sendReliable({
+                type: 'briefing', seq: 0, ts: performance.now(),
+                data: { missionIndex: currentMission },
+              });
+            }
+            setForceUpdate(v => v + 1);
           }
+          // Guest: handled by receiving 'upgrade' or 'briefing' message from host
         }
       }
 

@@ -899,10 +899,39 @@ export function renderBriefing(ctx: CanvasRenderingContext2D, state: GameState, 
   const btnY = Math.min(y, h - btnH - 20);
   const btnX = cx - btnW / 2;
   const pulse = 0.85 + Math.sin(time * 0.08) * 0.15;
-  ctx.fillStyle = `rgba(239,68,68,${pulse})`;
-  ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 14); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(20 * s)}px Arial`;
-  ctx.fillText('🚑 ВЫЕЗЖАЕМ!', cx, btnY + btnH / 2);
+
+  if (state.mp?.isMultiplayer) {
+    // Multiplayer: show mission # / total, and different button for host vs guest
+    const isHost = state.mp.netRole === 'host';
+    const missionLabel = `Миссия ${state.missionIndex + 1}/${MISSIONS.length}`;
+    ctx.fillStyle = '#60a5fa'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+    ctx.fillText(`🤝 КООП — ${missionLabel}`, cx, btnY - Math.round(18 * s));
+
+    if (isHost) {
+      ctx.fillStyle = `rgba(34,197,94,${pulse})`;
+      ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 14); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(20 * s)}px Arial`;
+      ctx.fillText('🚀 НАЧАТЬ МИССИЮ', cx, btnY + btnH / 2);
+    } else {
+      ctx.fillStyle = 'rgba(71,85,105,0.6)';
+      ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 14); ctx.fill();
+      ctx.fillStyle = '#fbbf24'; ctx.font = `bold ${Math.round(18 * s)}px Arial`;
+      const dots = '.'.repeat(Math.floor(time / 30) % 4);
+      ctx.fillText(`⏳ Ожидание хоста${dots}`, cx, btnY + btnH / 2);
+    }
+    // Ping
+    if (state.mp.connected) {
+      ctx.fillStyle = state.mp.ping < 50 ? '#34d399' : state.mp.ping < 100 ? '#fbbf24' : '#ef4444';
+      ctx.font = `${Math.round(12 * s)}px Arial`; ctx.textAlign = 'right';
+      ctx.fillText(`${state.mp.ping}ms`, w - 10, 16);
+      ctx.textAlign = 'center';
+    }
+  } else {
+    ctx.fillStyle = `rgba(239,68,68,${pulse})`;
+    ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 14); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(20 * s)}px Arial`;
+    ctx.fillText('🚑 ВЫЕЗЖАЕМ!', cx, btnY + btnH / 2);
+  }
 }
 
 export function renderRunnerBriefing(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
@@ -1327,10 +1356,42 @@ export function renderUpgrade(ctx: CanvasRenderingContext2D, state: GameState, w
   const finalBtnY = Math.min(btnY2, h - btnH - 16);
   const btnX = cx - btnW / 2;
   const pulse = 0.85 + Math.sin(time * 0.08) * 0.15;
-  ctx.fillStyle = `rgba(59,130,246,${pulse})`;
-  ctx.beginPath(); ctx.roundRect(btnX, finalBtnY, btnW, btnH, 14); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(18 * s)}px Arial`;
-  ctx.fillText('▶ ПРОДОЛЖИТЬ', cx, finalBtnY + btnH / 2);
+
+  if (state.mp?.isMultiplayer) {
+    const mp = state.mp;
+    const iAmReady = mp.netRole === 'host' ? mp.hostReady : mp.guestReady;
+    const otherReady = mp.netRole === 'host' ? mp.guestReady : mp.hostReady;
+
+    // Ready button
+    if (iAmReady) {
+      ctx.fillStyle = 'rgba(34,197,94,0.5)';
+      ctx.beginPath(); ctx.roundRect(btnX, finalBtnY, btnW, btnH, 14); ctx.fill();
+      ctx.fillStyle = '#34d399'; ctx.font = `bold ${Math.round(16 * s)}px Arial`;
+      const dots = '.'.repeat(Math.floor(time / 30) % 4);
+      ctx.fillText(otherReady ? '✅ Оба готовы!' : `✅ Ожидание напарника${dots}`, cx, finalBtnY + btnH / 2);
+    } else {
+      ctx.fillStyle = `rgba(59,130,246,${pulse})`;
+      ctx.beginPath(); ctx.roundRect(btnX, finalBtnY, btnW, btnH, 14); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(18 * s)}px Arial`;
+      ctx.fillText('✅ ГОТОВ', cx, finalBtnY + btnH / 2);
+    }
+
+    // Mission progress + ping
+    const infoFS = Math.round(12 * s);
+    ctx.fillStyle = '#60a5fa'; ctx.font = `${infoFS}px Arial`;
+    ctx.fillText(`Следующая: Миссия ${state.missionIndex + 1}/${MISSIONS.length}`, cx, finalBtnY + btnH + Math.round(16 * s));
+    if (mp.connected) {
+      ctx.fillStyle = mp.ping < 50 ? '#34d399' : mp.ping < 100 ? '#fbbf24' : '#ef4444';
+      ctx.font = `${infoFS}px Arial`; ctx.textAlign = 'right';
+      ctx.fillText(`${mp.ping}ms`, w - 10, 16);
+      ctx.textAlign = 'center';
+    }
+  } else {
+    ctx.fillStyle = `rgba(59,130,246,${pulse})`;
+    ctx.beginPath(); ctx.roundRect(btnX, finalBtnY, btnW, btnH, 14); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(18 * s)}px Arial`;
+    ctx.fillText('▶ ПРОДОЛЖИТЬ', cx, finalBtnY + btnH / 2);
+  }
 }
 
 export function renderEnding(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
