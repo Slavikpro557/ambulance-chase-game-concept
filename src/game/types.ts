@@ -261,6 +261,8 @@ export interface MultiplayerState {
   // Disconnect
   disconnected: boolean;
   disconnectTimer: number;
+  // Round end auto-return to lobby
+  roundEndTime: number;
   // Rematch
   rematchRequested: boolean;
   remoteRematchRequested: boolean;

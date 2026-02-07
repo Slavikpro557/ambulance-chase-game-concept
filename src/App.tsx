@@ -47,6 +47,7 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
     derbyWins: [0, 0],
     disconnected: false,
     disconnectTimer: 0,
+    roundEndTime: 0,
     rematchRequested: false,
     remoteRematchRequested: false,
   };
@@ -123,10 +124,21 @@ export function App() {
           break;
         }
         case 'fullSync': {
-          // Guest receives full game state
+          // Guest receives full game state or round end
           if (s.mp.netRole === 'guest') {
             try {
               const payload = msg.data as any;
+              // Check if this is a round end notification
+              if (payload.roundEnd) {
+                gameAudio.siren(false);
+                stateRef.current = {
+                  ...s,
+                  screen: 'lobby',
+                  mp: { ...s.mp, lobbyScreen: 'modeSelect' },
+                };
+                setForceUpdate(v => v + 1);
+                break;
+              }
               const newState = applyFullSyncPayload(s, payload, s.mp.multiplayerMode);
               stateRef.current = newState;
               setForceUpdate(v => v + 1);
@@ -368,11 +380,9 @@ export function App() {
           }
         }
         gameAudio.siren(false);
-        // Multiplayer: go to menu instead of next mission
+        // Multiplayer: wait for auto-return (game loop handles it after 3s)
         if (state.mp?.isMultiplayer) {
-          networkRef.current?.destroy(); networkRef.current = null;
-          stateRef.current = createInitialStateWithSave();
-          break;
+          break; // do nothing on click — auto-returns to lobby
         }
         saveProgress(state);
         if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
@@ -396,21 +406,18 @@ export function App() {
         break;
       }
       case 'failed': {
-        // Check for menu button click
-        if (canvas && clickX !== undefined && clickY !== undefined) {
+        // Check for menu button click (solo only)
+        if (!state.mp && canvas && clickX !== undefined && clickY !== undefined) {
           if (isMenuBtn(clickX, clickY, canvas.width, canvas.height)) {
             gameAudio.siren(false);
-            if (state.mp) { networkRef.current?.destroy(); networkRef.current = null; }
             stateRef.current = createInitialStateWithSave();
             break;
           }
         }
         gameAudio.siren(false);
-        // Multiplayer: go to menu instead of retry
+        // Multiplayer: wait for auto-return (game loop handles it after 3s)
         if (state.mp?.isMultiplayer) {
-          networkRef.current?.destroy(); networkRef.current = null;
-          stateRef.current = createInitialStateWithSave();
-          break;
+          break; // do nothing on click — auto-returns to lobby
         }
         if (state.gameMode === 'runner' || state.gameMode === 'extremal') {
           stateRef.current = startRunnerLevel(state);
@@ -935,7 +942,6 @@ export function App() {
       lastTimeRef.current = timestamp;
       const dt = Math.min(elapsed / 1000, 0.05);
 
-      const prevScreen = stateRef.current.screen;
       const isMP = !!stateRef.current.mp?.isMultiplayer;
       const isHost = stateRef.current.mp?.netRole === 'host';
       const isGuest = stateRef.current.mp?.netRole === 'guest';
@@ -946,11 +952,17 @@ export function App() {
         const mpDisconnected = stateRef.current.mp?.disconnected;
 
         if ((!isMP || isHost) && !mpDisconnected) {
+          const prevScreen = stateRef.current.screen;
           // Solo or Host: run simulation
           stateRef.current = updateGame(stateRef.current, dt);
 
+          // Host: detect round end and notify guest
+          if (isHost && net?.isConnected && prevScreen === 'playing' && stateRef.current.screen !== 'playing') {
+            net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: stateRef.current.screen } });
+          }
+
           // Host: send snapshot every 6th frame (~10/sec) to avoid buffer overflow
-          if (isHost && net?.isConnected) {
+          if (isHost && net?.isConnected && stateRef.current.screen === 'playing') {
             snapshotFrameRef.current++;
             if (snapshotFrameRef.current % 6 === 0) {
               const snap = createSnapshot(stateRef.current);
@@ -981,6 +993,28 @@ export function App() {
 
           // Increment time for rendering
           stateRef.current = { ...stateRef.current, time: (stateRef.current.time || 0) + 1 };
+        }
+      }
+
+      // Multiplayer: auto-return to lobby after saved/failed (3 sec)
+      if (isMP && (stateRef.current.screen === 'saved' || stateRef.current.screen === 'failed')) {
+        if (!stateRef.current.mp?.roundEndTime) {
+          stateRef.current = {
+            ...stateRef.current,
+            mp: { ...stateRef.current.mp!, roundEndTime: performance.now() },
+          };
+        } else if (performance.now() - stateRef.current.mp.roundEndTime > 3000) {
+          gameAudio.siren(false);
+          // Host notifies guest
+          if (isHost && net?.isConnected) {
+            net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: stateRef.current.screen } });
+          }
+          stateRef.current = {
+            ...stateRef.current,
+            screen: 'lobby',
+            mp: { ...stateRef.current.mp!, lobbyScreen: 'modeSelect', roundEndTime: 0 },
+          };
+          setForceUpdate(v => v + 1);
         }
       }
 
