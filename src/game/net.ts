@@ -92,6 +92,7 @@ export class GameNetwork {
   private seq = 0;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private lastPingSent = 0;
+  private lastPongReceived = 0;
   private iceServers: RTCIceServer[] = [];
 
   public state: ConnectionState = 'idle';
@@ -251,14 +252,26 @@ export class GameNetwork {
 
     conn.on('close', () => {
       log('DataConnection closed');
-      this.setState('disconnected');
-      this.stopPing();
+      // Only disconnect if we were connected (ignore during setup)
+      if (this.state === 'connected') {
+        this.setState('disconnected');
+        this.stopPing();
+      }
     });
 
     conn.on('error', (err) => {
       log('DataConnection error:', err);
-      this.setState('disconnected');
-      this.stopPing();
+      // Don't immediately disconnect on non-fatal errors
+      if (this.state === 'connected') {
+        // Check if channel is actually dead
+        if (!this.dataConn?.open) {
+          this.setState('disconnected');
+          this.stopPing();
+        }
+      } else {
+        this.setState('disconnected');
+        this.stopPing();
+      }
     });
   }
 
@@ -282,6 +295,7 @@ export class GameNetwork {
 
         if (msg.type === 'pong') {
           this.ping = Math.round((performance.now() - this.lastPingSent) / 2);
+          this.lastPongReceived = performance.now();
           return;
         }
         if (msg.type === 'ping') {
@@ -299,6 +313,14 @@ export class GameNetwork {
 
   sendReliable(msg: NetMessage) {
     if (!this.dataConn?.open) return;
+    // Buffer overflow protection: skip non-critical messages if buffer is full
+    try {
+      const dc = (this.dataConn as any)._dc || (this.dataConn as any).dataChannel;
+      if (dc && dc.bufferedAmount > 64 * 1024) {
+        // Buffer > 64KB — skip snapshots and keys, keep critical messages
+        if (msg.type === 'snapshot' || msg.type === 'keys') return;
+      }
+    } catch { /* ignore */ }
     try {
       this.dataConn.send(msg);
     } catch { /* channel closed */ }
@@ -334,7 +356,15 @@ export class GameNetwork {
   // === Ping ===
   private startPing() {
     this.stopPing();
+    this.lastPongReceived = performance.now();
     this.pingInterval = setInterval(() => {
+      // Check for dead connection: no pong in 10 seconds
+      if (this.lastPongReceived > 0 && performance.now() - this.lastPongReceived > 10000) {
+        log('No pong for 10s — connection dead');
+        this.setState('disconnected');
+        this.stopPing();
+        return;
+      }
       this.lastPingSent = performance.now();
       this.sendReliable({ type: 'ping', seq: this.seq++, ts: this.lastPingSent, data: null });
     }, 2000);

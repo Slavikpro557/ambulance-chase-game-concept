@@ -949,26 +949,29 @@ export function App() {
           // Solo or Host: run simulation
           stateRef.current = updateGame(stateRef.current, dt);
 
-          // Host: send snapshot every 3rd frame + send guest keys to engine
+          // Host: send snapshot every 6th frame (~10/sec) to avoid buffer overflow
           if (isHost && net?.isConnected) {
             snapshotFrameRef.current++;
-            if (snapshotFrameRef.current % 3 === 0) {
+            if (snapshotFrameRef.current % 6 === 0) {
               const snap = createSnapshot(stateRef.current);
               const snapStr = serializeSnapshot(snap);
               net.sendReliable({ type: 'snapshot', seq: 0, ts: performance.now(), data: snapStr });
             }
           }
         } else if (isGuest && stateRef.current.mp && !mpDisconnected) {
-          // Guest: interpolate between snapshots, send keys
+          // Guest: interpolate between snapshots, send keys (every 3rd frame = ~20/sec)
           const mp = stateRef.current.mp;
           if (net?.isConnected) {
-            net.sendKeys(serializeKeys(stateRef.current.keys));
+            snapshotFrameRef.current++;
+            if (snapshotFrameRef.current % 3 === 0) {
+              net.sendKeys(serializeKeys(stateRef.current.keys));
+            }
           }
 
           // Interpolate
           if (mp.prevSnapshot && mp.currSnapshot) {
             const elapsed = performance.now() - mp.snapshotTime;
-            const snapInterval = 50; // ~20Hz = 50ms between snapshots
+            const snapInterval = 100; // ~10Hz = 100ms between snapshots
             const t = Math.min(1.5, elapsed / snapInterval);
             const interpolated = interpolateSnapshots(mp.prevSnapshot, mp.currSnapshot, t);
             stateRef.current = applySnapshotToState(stateRef.current, interpolated);
@@ -1134,6 +1137,59 @@ export function App() {
     }
   }, []);
 
+  const handleMobilePaste = useCallback(async () => {
+    const s = stateRef.current;
+    if (!s.mp) return;
+    const validChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    try {
+      let text = '';
+      if (navigator.clipboard?.readText) {
+        text = await navigator.clipboard.readText();
+      }
+      if (!text) return;
+      // Filter to valid chars only, take up to 6
+      const cleaned = text.toUpperCase().split('').filter(c => validChars.includes(c)).join('').slice(0, 6);
+      if (cleaned.length === 0) return;
+      const s2 = stateRef.current;
+      if (!s2.mp) return;
+      stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: cleaned, inputError: '' } };
+      setForceUpdate(v => v + 1);
+      if (cleaned.length === 6 && networkRef.current) {
+        networkRef.current.joinRoom(cleaned).catch((err) => {
+          const s3 = stateRef.current;
+          if (s3.mp) {
+            const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
+            stateRef.current = { ...s3, mp: { ...s3.mp, inputCode: '', inputError: errMsg } };
+            setForceUpdate(v => v + 1);
+          }
+        });
+      }
+    } catch {
+      // Clipboard API failed — try input element
+      if (copyInputRef.current) {
+        const inp = copyInputRef.current;
+        inp.value = '';
+        inp.style.display = 'block';
+        inp.readOnly = false;
+        inp.focus();
+        try { document.execCommand('paste'); } catch {}
+        const text = inp.value;
+        inp.readOnly = true;
+        inp.style.display = 'none';
+        if (text) {
+          const cleaned = text.toUpperCase().split('').filter(c => validChars.includes(c)).join('').slice(0, 6);
+          if (cleaned.length > 0) {
+            const s2 = stateRef.current;
+            if (s2.mp) {
+              stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: cleaned, inputError: '' } };
+              setForceUpdate(v => v + 1);
+            }
+          }
+        }
+      }
+    }
+  }, []);
+
   const handleMobileCopy = useCallback(() => {
     const code = stateRef.current.mp?.roomCode;
     if (!code) return;
@@ -1213,16 +1269,21 @@ export function App() {
               }}>{ch}</button>
             ))}
           </div>
-          {/* Backspace + Back buttons */}
-          <div style={{ display: 'flex', gap: '12px', width: '100%', maxWidth: '360px' }}>
+          {/* Paste + Backspace + Back buttons */}
+          <div style={{ display: 'flex', gap: '8px', width: '100%', maxWidth: '360px' }}>
+            <button onClick={handleMobilePaste} style={{
+              flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+              background: 'rgba(59,130,246,0.7)', color: '#fff', fontSize: '14px',
+              fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
+            }}>📋 Вставить</button>
             <button onClick={() => handleMobileKeyPress('DEL')} style={{
               flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
-              background: 'rgba(239,68,68,0.6)', color: '#fff', fontSize: '16px',
+              background: 'rgba(239,68,68,0.6)', color: '#fff', fontSize: '14px',
               fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
             }}>⌫ Удалить</button>
             <button onClick={() => handleMobileKeyPress('BACK')} style={{
               flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
-              background: 'rgba(100,116,139,0.6)', color: '#fff', fontSize: '16px',
+              background: 'rgba(100,116,139,0.6)', color: '#fff', fontSize: '14px',
               fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
             }}>◀ Назад</button>
           </div>
