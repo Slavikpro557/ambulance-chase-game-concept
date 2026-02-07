@@ -54,6 +54,7 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const copyInputRef = useRef<HTMLInputElement>(null);
   const stateRef = useRef<GameState>(createInitialStateWithSave());
   const animRef = useRef<number>(0);
   const lastTimeRef = useRef(0);
@@ -514,22 +515,30 @@ export function App() {
           const cpyH = Math.round(44 * layout.s);
           if (clickY >= y && clickY <= y + cpyH &&
               clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
-            // Mobile-friendly clipboard fallback
-            try {
-              if (navigator.clipboard?.writeText) {
-                navigator.clipboard.writeText(mp.roomCode).catch(() => {});
-              } else {
-                const ta = document.createElement('textarea');
-                ta.value = mp.roomCode;
-                ta.style.position = 'fixed';
-                ta.style.opacity = '0';
-                document.body.appendChild(ta);
-                ta.focus();
-                ta.select();
-                document.execCommand('copy');
-                document.body.removeChild(ta);
-              }
-            } catch { /* ignore */ }
+            // Multi-strategy copy for iOS/Android/Desktop
+            const code = mp.roomCode;
+            let copied = false;
+            // Strategy 1: Native share (works perfectly on iOS/Android)
+            if (navigator.share) {
+              navigator.share({ text: code }).catch(() => {});
+              copied = true;
+            }
+            // Strategy 2: Hidden input select+copy (iOS Safari compatible)
+            if (!copied && copyInputRef.current) {
+              const inp = copyInputRef.current;
+              inp.value = code;
+              inp.style.display = 'block';
+              inp.focus();
+              inp.setSelectionRange(0, code.length);
+              try { copied = document.execCommand('copy'); } catch {}
+              inp.style.display = 'none';
+            }
+            // Strategy 3: Clipboard API
+            if (!copied) {
+              try { navigator.clipboard?.writeText(code).catch(() => {}); } catch {}
+            }
+            // Visual feedback
+            stateRef.current.flashMessages.push({ text: '✅ Код скопирован!', timer: 120, color: '#34d399' });
             break;
           }
         }
@@ -1080,6 +1089,13 @@ export function App() {
   return (
     <div className="w-screen h-screen overflow-hidden bg-black select-none">
       <canvas ref={canvasRef} className="block w-full h-full" onClick={handleCanvasClick} style={{ touchAction: 'none' }} />
+      {/* Hidden input for iOS clipboard copy */}
+      <input
+        ref={copyInputRef}
+        readOnly
+        style={{ position: 'fixed', top: '-9999px', left: '-9999px', opacity: 0, display: 'none', fontSize: '16px' }}
+        aria-hidden="true"
+      />
     </div>
   );
 }

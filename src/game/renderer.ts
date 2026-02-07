@@ -1661,7 +1661,8 @@ export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: 
     ctx.fillStyle = 'rgba(34,197,94,0.8)';
     ctx.beginPath(); ctx.roundRect(btnX, y, btnW, cpyH, 10); ctx.fill();
     ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
-    ctx.fillText('📋 КОПИРОВАТЬ КОД', w / 2, y + cpyH / 2);
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    ctx.fillText(isMobile && navigator.share ? '📤 ПОДЕЛИТЬСЯ КОДОМ' : '📋 КОПИРОВАТЬ КОД', w / 2, y + cpyH / 2);
     y += cpyH + 20;
 
     // Waiting animation
