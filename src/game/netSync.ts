@@ -109,14 +109,76 @@ export function createSnapshot(state: GameState): StateSnapshot {
   return snap;
 }
 
-// === SNAPSHOT JSON (reliable for now, optimize to binary later if needed) ===
+// === SNAPSHOT JSON — compact serialization ===
+
+function roundNum(n: number): number {
+  return Math.round(n * 10) / 10;
+}
 
 export function serializeSnapshot(snap: StateSnapshot): string {
-  return JSON.stringify(snap);
+  // Compact: round floats, abbreviate traffic car fields
+  const compact: any = {
+    q: snap.seq,
+    t: Math.round(snap.ts),
+    a: [roundNum(snap.amb1.x), roundNum(snap.amb1.y), roundNum(snap.amb1.vx), roundNum(snap.amb1.vy),
+        roundNum(snap.amb1.angle), snap.amb1.health, roundNum(snap.amb1.speed), roundNum(snap.amb1.nitroTimer)],
+    p: snap.patients.map(p => [roundNum(p.x), roundNum(p.y), roundNum(p.vx), roundNum(p.vy),
+        p.caught ? 1 : 0, roundNum(p.health), roundNum(p.panicLevel), roundNum(p.stunTimer), p.storyIdx]),
+    u: snap.powerUps.map(pu => [roundNum(pu.x), roundNum(pu.y), pu.type, pu.collected ? 1 : 0]),
+    c: snap.trafficCars.map(tc => [roundNum(tc.x), roundNum(tc.y), roundNum(tc.vx), roundNum(tc.vy), roundNum(tc.angle)]),
+    tl: roundNum(snap.timeLeft),
+    sc: snap.scores,
+    sr: snap.screen,
+    cc: snap.comboCount,
+    ct: roundNum(snap.comboTimer),
+    cs: roundNum(snap.cameraShake),
+    ae: snap.audioEvents,
+    fm: snap.flashMessages,
+  };
+  if (snap.amb2) {
+    compact.a2 = [roundNum(snap.amb2.x), roundNum(snap.amb2.y), roundNum(snap.amb2.vx), roundNum(snap.amb2.vy),
+        roundNum(snap.amb2.angle), snap.amb2.health, roundNum(snap.amb2.speed), roundNum(snap.amb2.nitroTimer)];
+  }
+  if (snap.runner1) {
+    compact.r1 = [roundNum(snap.runner1.x), roundNum(snap.runner1.y), roundNum(snap.runner1.vx), roundNum(snap.runner1.vy),
+        roundNum(snap.runner1.angle), roundNum(snap.runner1.speed), roundNum(snap.runner1.stamina),
+        snap.runner1.playerHealth, roundNum(snap.runner1.invisibleTimer), roundNum(snap.runner1.speedBoostTimer), roundNum(snap.runner1.caughtTimer)];
+  }
+  if (snap.derbyRound !== undefined) { compact.dr = snap.derbyRound; compact.dw = snap.derbyWins; }
+  if (snap.activeEvent) { compact.ev = { t: snap.activeEvent.type, m: roundNum(snap.activeEvent.timer), x: roundNum(snap.activeEvent.x), y: roundNum(snap.activeEvent.y) }; }
+  if (snap.nearMissCombo) compact.nm = snap.nearMissCombo;
+  if (snap.isDrifting) compact.id = 1;
+  return JSON.stringify(compact);
 }
 
 export function deserializeSnapshot(data: string): StateSnapshot {
-  return JSON.parse(data) as StateSnapshot;
+  const c = JSON.parse(data);
+  // If it has 'seq' field, it's old format — handle gracefully
+  if (c.seq !== undefined) return c as StateSnapshot;
+  // Compact format
+  const snap: StateSnapshot = {
+    seq: c.q,
+    ts: c.t,
+    amb1: { x: c.a[0], y: c.a[1], vx: c.a[2], vy: c.a[3], angle: c.a[4], health: c.a[5], speed: c.a[6], nitroTimer: c.a[7] },
+    patients: c.p.map((p: number[]) => ({ x: p[0], y: p[1], vx: p[2], vy: p[3], caught: !!p[4], health: p[5], panicLevel: p[6], stunTimer: p[7], storyIdx: p[8] })),
+    powerUps: c.u.map((u: any[]) => ({ x: u[0], y: u[1], type: u[2], collected: !!u[3] })),
+    trafficCars: c.c.map((tc: number[]) => ({ x: tc[0], y: tc[1], vx: tc[2], vy: tc[3], angle: tc[4] })),
+    timeLeft: c.tl,
+    scores: c.sc,
+    screen: c.sr,
+    comboCount: c.cc,
+    comboTimer: c.ct,
+    cameraShake: c.cs,
+    audioEvents: c.ae || [],
+    flashMessages: c.fm || [],
+  };
+  if (c.a2) snap.amb2 = { x: c.a2[0], y: c.a2[1], vx: c.a2[2], vy: c.a2[3], angle: c.a2[4], health: c.a2[5], speed: c.a2[6], nitroTimer: c.a2[7] };
+  if (c.r1) snap.runner1 = { x: c.r1[0], y: c.r1[1], vx: c.r1[2], vy: c.r1[3], angle: c.r1[4], speed: c.r1[5], stamina: c.r1[6], playerHealth: c.r1[7], invisibleTimer: c.r1[8], speedBoostTimer: c.r1[9], caughtTimer: c.r1[10] };
+  if (c.dr !== undefined) { snap.derbyRound = c.dr; snap.derbyWins = c.dw; }
+  if (c.ev) snap.activeEvent = { type: c.ev.t, timer: c.ev.m, x: c.ev.x, y: c.ev.y };
+  snap.nearMissCombo = c.nm || 0;
+  snap.isDrifting = !!c.id;
+  return snap;
 }
 
 // === INTERPOLATION ===

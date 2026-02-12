@@ -124,6 +124,8 @@ export function App() {
             try {
               const snapData = typeof msg.data === 'string' ? msg.data : String(msg.data);
               const snap = deserializeSnapshot(snapData);
+              // Skip stale snapshots (out-of-order arrival)
+              if (s.mp.currSnapshot && snap.seq <= s.mp.currSnapshot.seq) break;
               const prevSnap = s.mp.currSnapshot;
               stateRef.current = {
                 ...s,
@@ -1168,10 +1170,15 @@ export function App() {
             net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: endScreen, missionIndex: stateRef.current.missionIndex } });
           }
 
-          // Host: send snapshot every 6th frame (~10/sec) to avoid buffer overflow
+          // Host: send snapshot adaptively (~10/sec, throttle if buffer backs up)
           if (isHost && net?.isConnected && stateRef.current.screen === 'playing') {
             snapshotFrameRef.current++;
-            if (snapshotFrameRef.current % 6 === 0) {
+            // Adaptive: check WebRTC buffer, increase interval if congested
+            let sendInterval = 6; // default ~10Hz
+            const buf = net.bufferedAmount;
+            if (buf > 32 * 1024) sendInterval = 12; // 5Hz if buffer > 32KB
+            if (buf > 64 * 1024) sendInterval = 24; // 2.5Hz if buffer > 64KB
+            if (snapshotFrameRef.current % sendInterval === 0) {
               const snap = createSnapshot(stateRef.current);
               const snapStr = serializeSnapshot(snap);
               net.sendReliable({ type: 'snapshot', seq: 0, ts: performance.now(), data: snapStr });

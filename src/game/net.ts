@@ -411,4 +411,11 @@ export class GameNetwork {
   get isConnected(): boolean {
     return this.state === 'connected';
   }
+
+  get bufferedAmount(): number {
+    try {
+      const dc = (this.dataConn as any)?._dc || (this.dataConn as any)?.dataChannel;
+      return dc?.bufferedAmount ?? 0;
+    } catch { return 0; }
+  }
 }

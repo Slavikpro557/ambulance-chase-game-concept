@@ -1552,16 +1552,21 @@ function updateCoopRescue(state: GameState, dt: number): GameState {
   s.ambulance = updatedAmb1;
   mp.ambulance2 = updatedAmb2;
 
-  // Traffic
+  // Traffic (with building collisions — same as solo mode)
   s.trafficCars = state.trafficCars.map(car => {
     const c = { ...car };
     c.x += c.vx; c.y += c.vy;
     if (c.x < -200) c.x = cs + 200; if (c.x > cs + 200) c.x = -200;
     if (c.y < -200) c.y = cs + 200; if (c.y > cs + 200) c.y = -200;
+    const nearCarBldgs = state.buildingGrid ? state.buildingGrid.queryNear(c.x, c.y, 50) : state.buildings;
+    for (const b of nearCarBldgs) {
+      const r = resolveRectCollision(c.x - c.width / 2, c.y - c.height / 2, c.width, c.height, b.x, b.y, b.w, b.h);
+      if (r.hit) { c.x += r.dx; c.y += r.dy; if (r.dx !== 0) c.vx = -c.vx; if (r.dy !== 0) c.vy = -c.vy; }
+    }
     return c;
   });
 
-  // Patients (flee from nearest ambulance)
+  // Patients (flee from nearest ambulance, with building collisions)
   s.patients = state.patients.map(p => {
     if (p.caught) return p;
     const pat = { ...p };
@@ -1574,7 +1579,21 @@ function updateCoopRescue(state: GameState, dt: number): GameState {
     const pSpd = (1.5 + pat.story.speed * (mission.difficulty * 0.12)) * (1 + pat.panicLevel * 1.2);
     if (nearD < 250) { pat.angle = Math.atan2(pat.y - nearestAmb.y, pat.x - nearestAmb.x) + (Math.random() - 0.5) * pat.story.erratic; }
     else if (Math.random() < 0.02) { pat.angle += (Math.random() - 0.5) * 2; }
-    pat.x += Math.cos(pat.angle) * pSpd; pat.y += Math.sin(pat.angle) * pSpd;
+    let dx2 = pat.x + Math.cos(pat.angle) * pSpd, dy2 = pat.y + Math.sin(pat.angle) * pSpd;
+    let patHit = false;
+    const nearPatBldgs = state.buildingGrid ? state.buildingGrid.queryNear(dx2, dy2, 50) : state.buildings;
+    for (let pass = 0; pass < 3; pass++) {
+      let resolved = true;
+      for (const b of nearPatBldgs) {
+        if (Math.abs(dx2 - b.x - b.w / 2) > b.w / 2 + 15 && Math.abs(dy2 - b.y - b.h / 2) > b.h / 2 + 15) continue;
+        const r = resolveRectCollision(dx2 - 10, dy2 - 10, 20, 20, b.x, b.y, b.w, b.h);
+        if (r.hit) { dx2 += r.dx * 1.1; dy2 += r.dy * 1.1; patHit = true; resolved = false; }
+      }
+      if (resolved) break;
+    }
+    if (patHit) pat.angle += (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2 + Math.random() * 0.5);
+    pat.vx = dx2 - pat.x; pat.vy = dy2 - pat.y;
+    pat.x = dx2; pat.y = dy2;
     pat.x = clamp(pat.x, 50, cs - 50); pat.y = clamp(pat.y, 50, cs - 50);
     pat.health -= 0.008 * (1 + mission.difficulty * 0.4);
     return pat;
