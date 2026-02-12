@@ -111,6 +111,17 @@ export interface SaveData {
   tutorialShown: boolean;
 }
 
+export type DynamicEventType =
+  | 'trafficJam' | 'roadBlock' | 'patientSprint' | 'policeChase'
+  | 'earthquake' | 'blackout' | 'breakdown';
+
+export interface DynamicEvent {
+  type: DynamicEventType;
+  timer: number;
+  x: number; y: number;
+  data?: any;
+}
+
 export interface GameState {
   screen: GameScreen;
   gameMode: GameMode;
@@ -172,6 +183,18 @@ export interface GameState {
   // Audio events (consumed by App.tsx each frame)
   audioEvents: string[];
 
+  // Dynamic events system
+  activeEvent: DynamicEvent | null;
+  eventCooldown: number;
+
+  // Near-miss combo
+  nearMissCombo: number;
+  nearMissTimer: number;
+
+  // Drift mechanic
+  driftTimer: number;
+  isDrifting: boolean;
+
   // Multiplayer (undefined = solo mode)
   mp?: MultiplayerState;
 }
@@ -231,6 +254,10 @@ export interface StateSnapshot {
   // Derby specific
   derbyRound?: number;
   derbyWins?: [number, number];
+  // Dynamic gameplay
+  activeEvent?: { type: string; timer: number; x: number; y: number } | null;
+  nearMissCombo?: number;
+  isDrifting?: boolean;
 }
 
 export interface MultiplayerState {

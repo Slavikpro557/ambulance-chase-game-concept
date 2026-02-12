@@ -117,6 +117,41 @@ class GameAudio {
 
   countdown() { this.tone(800, 0.08, 'sine', 0.3); }
 
+  nearmiss() {
+    // Quick whoosh sound
+    if (!this.ctx || !this.masterGain) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(200, this.ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(800, this.ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.15, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.15);
+    osc.connect(gain); gain.connect(this.masterGain);
+    osc.start(); osc.stop(this.ctx.currentTime + 0.15);
+  }
+
+  event() {
+    // Alert tone: two quick beeps
+    this.tone(600, 0.08, 'square', 0.2);
+    setTimeout(() => this.tone(800, 0.08, 'square', 0.2), 100);
+  }
+
+  police() {
+    // Short police wail
+    if (!this.ctx || !this.masterGain) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(500, this.ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(800, this.ctx.currentTime + 0.15);
+    osc.frequency.linearRampToValueAtTime(500, this.ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.35);
+    osc.connect(gain); gain.connect(this.masterGain);
+    osc.start(); osc.stop(this.ctx.currentTime + 0.35);
+  }
+
   siren(on: boolean) {
     if (!this.ctx || !this.masterGain) return;
     if (on && !this.sirenOsc1) {
@@ -158,6 +193,9 @@ class GameAudio {
       case 'honk': this.honk(); break;
       case 'hazardDamage': this.hazardDamage(); break;
       case 'countdown': this.countdown(); break;
+      case 'nearmiss': this.nearmiss(); break;
+      case 'event': this.event(); break;
+      case 'police': this.police(); break;
     }
   }
 }

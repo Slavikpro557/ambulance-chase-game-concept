@@ -1,5 +1,11 @@
 import { GameState, Building, Patient, PowerUp, TrafficCar, RunnerPlayer, Ambulance, Hazard, Barrier } from './types';
 import { MISSIONS } from './missions';
+import { MP_MISSIONS } from './mpMissions';
+
+/** Pick the right mission array based on game state (MP coopRescue uses MP_MISSIONS) */
+function getMissionsR(state: GameState) {
+  return (state.mp?.isMultiplayer && state.mp.multiplayerMode === 'coopRescue') ? MP_MISSIONS : MISSIONS;
+}
 
 // ===== HELPERS =====
 
@@ -154,6 +160,40 @@ export function render(ctx: CanvasRenderingContext2D, state: GameState) {
     vig.addColorStop(0, 'rgba(255,0,0,0)'); vig.addColorStop(1, `rgba(255,0,0,${intensity})`);
     ctx.fillStyle = vig; ctx.fillRect(0, 0, w, h);
   }
+
+  // Blackout event vignette
+  if (state.activeEvent?.type === 'blackout') {
+    const blackAlpha = Math.min(0.85, 0.85 * Math.min(1, state.activeEvent.timer / 30));
+    const blackVig = ctx.createRadialGradient(w / 2, h / 2, 50, w / 2, h / 2, Math.max(w, h) * 0.55);
+    blackVig.addColorStop(0, 'rgba(0,0,0,0)');
+    blackVig.addColorStop(1, `rgba(0,0,0,${blackAlpha})`);
+    ctx.fillStyle = blackVig; ctx.fillRect(0, 0, w, h);
+  }
+
+  // Event progress bar (thin colored bar at top)
+  if (state.activeEvent && state.activeEvent.timer > 0) {
+    const evtColors: Record<string, string> = {
+      trafficJam: '#f59e0b', roadBlock: '#ef4444', patientSprint: '#c084fc',
+      policeChase: '#1e40af', earthquake: '#ef4444', blackout: '#6b7280', breakdown: '#f59e0b',
+    };
+    const maxTimer: Record<string, number> = {
+      trafficJam: 180, roadBlock: 240, patientSprint: 180,
+      policeChase: 600, earthquake: 180, blackout: 300, breakdown: 180,
+    };
+    const mt = maxTimer[state.activeEvent.type] || 300;
+    const pct = state.activeEvent.timer / mt;
+    ctx.fillStyle = evtColors[state.activeEvent.type] || '#fff';
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(0, 0, w * pct, 3);
+    ctx.globalAlpha = 1;
+  }
+
+  // Catch flash (white overlay on patient saved)
+  if (state.flashMessages.some(m => m.text.includes('спасён') && m.timer > 100)) {
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(0, 0, w, h);
+  }
+
   ctx.restore();
 }
 
@@ -830,7 +870,7 @@ export function renderMenu(ctx: CanvasRenderingContext2D, w: number, h: number, 
 }
 
 export function renderBriefing(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
-  const mission = MISSIONS[state.missionIndex]; if (!mission) return;
+  const mission = getMissionsR(state)[state.missionIndex]; if (!mission) return;
   ctx.fillStyle = 'rgba(0,0,0,0.95)'; ctx.fillRect(0, 0, w, h);
 
   const s = sf(w, h);
@@ -903,7 +943,7 @@ export function renderBriefing(ctx: CanvasRenderingContext2D, state: GameState, 
   if (state.mp?.isMultiplayer) {
     // Multiplayer: show mission # / total, and different button for host vs guest
     const isHost = state.mp.netRole === 'host';
-    const missionLabel = `Миссия ${state.missionIndex + 1}/${MISSIONS.length}`;
+    const missionLabel = `Миссия ${state.missionIndex + 1}/${getMissionsR(state).length}`;
     ctx.fillStyle = '#60a5fa'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
     ctx.fillText(`🤝 КООП — ${missionLabel}`, cx, btnY - Math.round(18 * s));
 
@@ -1113,7 +1153,7 @@ export function renderSaved(ctx: CanvasRenderingContext2D, state: GameState, w: 
     ctx.fillStyle = '#86efac'; ctx.font = `${storyFS}px Arial`;
     ctx.fillText(`Спасено: ${state.totalSaved} • Репутация: ${state.reputation}%`, cx, y + storyFS / 2); y += storyFS + 40;
 
-    const hasNext = state.missionIndex + 1 < MISSIONS.length;
+    const hasNext = state.missionIndex + 1 < getMissionsR(state).length;
     const btnW = Math.min(Math.round(300 * s), w - 32);
     const btnY = Math.min(y, h - btnH - 20);
     const btnX = cx - btnW / 2;
@@ -1137,7 +1177,7 @@ export function renderSaved(ctx: CanvasRenderingContext2D, state: GameState, w: 
     const elapsed = performance.now() - state.mp.roundEndTime;
     const remaining = Math.max(0, Math.ceil((3000 - elapsed) / 1000));
     const missionNum = state.missionIndex + 2; // next mission (1-based)
-    const totalMissions = MISSIONS.length;
+    const totalMissions = getMissionsR(state).length;
     const isLastMission = state.missionIndex + 1 >= totalMissions;
     const nextLabel = isLastMission ? '🏆 Финал!' : `Миссия ${missionNum}/${totalMissions}`;
     const countFS = Math.round(18 * s);
@@ -1242,7 +1282,7 @@ export function renderFailed(ctx: CanvasRenderingContext2D, state: GameState, w:
     const elapsed = performance.now() - state.mp.roundEndTime;
     const remaining = Math.max(0, Math.ceil((3000 - elapsed) / 1000));
     const missionNum = state.missionIndex + 1; // same mission (1-based)
-    const totalMissions = MISSIONS.length;
+    const totalMissions = getMissionsR(state).length;
     const countFS = Math.round(18 * s);
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
     ctx.fillRect(0, h - Math.round(50 * s), w, Math.round(50 * s));
@@ -1379,7 +1419,7 @@ export function renderUpgrade(ctx: CanvasRenderingContext2D, state: GameState, w
     // Mission progress + ping
     const infoFS = Math.round(12 * s);
     ctx.fillStyle = '#60a5fa'; ctx.font = `${infoFS}px Arial`;
-    ctx.fillText(`Следующая: Миссия ${state.missionIndex + 1}/${MISSIONS.length}`, cx, finalBtnY + btnH + Math.round(16 * s));
+    ctx.fillText(`Следующая: Миссия ${state.missionIndex + 1}/${getMissionsR(state).length}`, cx, finalBtnY + btnH + Math.round(16 * s));
     if (mp.connected) {
       ctx.fillStyle = mp.ping < 50 ? '#34d399' : mp.ping < 100 ? '#fbbf24' : '#ef4444';
       ctx.font = `${infoFS}px Arial`; ctx.textAlign = 'right';
@@ -1943,7 +1983,7 @@ export function drawMultiplayerHUD(ctx: CanvasRenderingContext2D, state: GameSta
   ctx.textAlign = 'right'; ctx.textBaseline = 'top';
   // Mission number
   ctx.fillStyle = '#60a5fa';
-  ctx.fillText(`Миссия ${state.missionIndex + 1}/${MISSIONS.length}`, w - 10, 10);
+  ctx.fillText(`Миссия ${state.missionIndex + 1}/${getMissionsR(state).length}`, w - 10, 10);
   // Ping
   ctx.fillStyle = mp.ping < 50 ? '#34d399' : mp.ping < 100 ? '#fbbf24' : '#ef4444';
   ctx.fillText(`${mp.ping}ms`, w - 10, 10 + infoFS + 4);

@@ -4,6 +4,7 @@ import type {
   SnapshotPatient, SnapshotPowerUp, Ambulance, RunnerPlayer,
   Patient, PowerUp, FullSyncPayload, MultiplayerMode
 } from './types';
+import { SpatialGrid } from './spatial';
 
 // === KEY SERIALIZATION (1 byte) ===
 
@@ -99,6 +100,11 @@ export function createSnapshot(state: GameState): StateSnapshot {
     snap.derbyRound = mp.derbyRound;
     snap.derbyWins = [...mp.derbyWins] as [number, number];
   }
+
+  // Dynamic gameplay
+  snap.activeEvent = state.activeEvent ? { type: state.activeEvent.type, timer: state.activeEvent.timer, x: state.activeEvent.x, y: state.activeEvent.y } : null;
+  snap.nearMissCombo = state.nearMissCombo;
+  snap.isDrifting = state.isDrifting;
 
   return snap;
 }
@@ -336,6 +342,24 @@ export function applySnapshotToState(
     s.mp = { ...s.mp, derbyRound: snap.derbyRound, derbyWins: snap.derbyWins ?? [0, 0] };
   }
 
+  // Dynamic gameplay
+  s.activeEvent = snap.activeEvent ? { type: snap.activeEvent.type as any, timer: snap.activeEvent.timer, x: snap.activeEvent.x, y: snap.activeEvent.y } : null;
+  s.nearMissCombo = snap.nearMissCombo ?? 0;
+  s.isDrifting = snap.isDrifting ?? false;
+
+  // Clamp positions to map boundaries (prevent going outside city)
+  const cs = s.mission?.citySize || 2000;
+  s.ambulance.x = Math.max(30, Math.min(cs - 30, s.ambulance.x));
+  s.ambulance.y = Math.max(30, Math.min(cs - 30, s.ambulance.y));
+  if (s.mp?.ambulance2) {
+    s.mp.ambulance2.x = Math.max(30, Math.min(cs - 30, s.mp.ambulance2.x));
+    s.mp.ambulance2.y = Math.max(30, Math.min(cs - 30, s.mp.ambulance2.y));
+  }
+  if (s.mp?.runner2) {
+    s.mp.runner2.x = Math.max(30, Math.min(cs - 30, s.mp.runner2.x));
+    s.mp.runner2.y = Math.max(30, Math.min(cs - 30, s.mp.runner2.y));
+  }
+
   // Guest camera: follow own entity (P2)
   if (s.mp?.netRole === 'guest') {
     let followX = s.ambulance.x, followY = s.ambulance.y;
@@ -360,7 +384,7 @@ export function applyFullSyncPayload(
   return {
     ...state,
     buildings: payload.buildings,
-    buildingGrid: null, // will be rebuilt
+    buildingGrid: new SpatialGrid(payload.buildings),
     mission: payload.mission,
     missionIndex: payload.missionIndex,
     weather: payload.weather,

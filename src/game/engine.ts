@@ -1,4 +1,4 @@
-import { GameState, Patient, TrafficCar, Building, PowerUp, Particle, Ambulance, Upgrades, RunnerPlayer, GameMode, Hazard, Barrier, HazardType, SaveData } from './types';
+import { GameState, Patient, TrafficCar, Building, PowerUp, Particle, Ambulance, Upgrades, RunnerPlayer, GameMode, Hazard, Barrier, HazardType, SaveData, DynamicEvent, DynamicEventType } from './types';
 import { MISSIONS } from './missions';
 import { SpatialGrid } from './spatial';
 
@@ -288,6 +288,9 @@ export function createInitialState(): GameState {
     time: 0, collisionCooldown: 0,
     aiStuckTimer: 0, aiAvoidAngle: 0, aiLastX: 0, aiLastY: 0,
     transitionAlpha: 0, tutorialShown: false, audioEvents: [],
+    activeEvent: null, eventCooldown: 0,
+    nearMissCombo: 0, nearMissTimer: 0,
+    driftTimer: 0, isDrifting: false,
   };
 }
 
@@ -980,7 +983,202 @@ export function startMission(state: GameState, missionIdx: number): GameState {
     hazards: [], barriers: [], backupAmbulances: [],
     aiBarrierCooldown: 0, aiNeutralizeCooldown: 0, aiBackupTimer: 999,
     transitionAlpha: 1, audioEvents: [],
+    activeEvent: null, eventCooldown: 0,
+    nearMissCombo: 0, nearMissTimer: 0,
+    driftTimer: 0, isDrifting: false,
   };
+}
+
+// ============ DYNAMIC EVENTS SYSTEM ============
+
+function processDynamicEvents(s: GameState, amb: Ambulance, audio: string[], newP: Particle[]): void {
+  const cs = s.mission?.citySize || 2000;
+
+  // Tick active event
+  if (s.activeEvent) {
+    s.activeEvent = { ...s.activeEvent, timer: s.activeEvent.timer - 1 };
+
+    // Apply active event effects
+    switch (s.activeEvent.type) {
+      case 'trafficJam': {
+        // Steer nearby cars toward jam point
+        const jx = s.activeEvent.x, jy = s.activeEvent.y;
+        s.trafficCars = s.trafficCars.map(c => {
+          const d = dist(c.x, c.y, jx, jy);
+          if (d < 400 && d > 30) {
+            const dx = jx - c.x, dy = jy - c.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+            return { ...c, vx: c.vx * 0.95 + (dx / len) * 0.4, vy: c.vy * 0.95 + (dy / len) * 0.4 };
+          }
+          return c;
+        });
+        break;
+      }
+      case 'patientSprint': {
+        const pidx = s.activeEvent.data?.patIdx;
+        if (pidx !== undefined && s.patients[pidx] && !s.patients[pidx].caught) {
+          s.patients = s.patients.map((p, i) => i === pidx ? { ...p, panicLevel: 1 } : p);
+        }
+        break;
+      }
+      case 'policeChase': {
+        const cidx = s.activeEvent.data?.carIdx;
+        if (cidx !== undefined && s.trafficCars[cidx]) {
+          const c = { ...s.trafficCars[cidx] };
+          const dx = amb.x - c.x, dy = amb.y - c.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+          c.vx = (dx / len) * 4; c.vy = (dy / len) * 4;
+          c.color = '#1e40af';
+          const d = dist(c.x, c.y, amb.x, amb.y);
+          if (d < 40 && s.activeEvent.timer > 60) {
+            s.timeLeft -= 3;
+            s.cameraShake = Math.max(s.cameraShake, 12);
+            s.flashMessages = [...(s.flashMessages || []), { text: '🚔 Штраф! -3 сек', timer: 60, color: '#ef4444' }];
+            audio.push('collision');
+            s.activeEvent = { ...s.activeEvent, timer: 60 }; // end soon after penalty
+          }
+          s.trafficCars = s.trafficCars.map((tc, i) => i === cidx ? c : tc);
+        }
+        break;
+      }
+      case 'earthquake': {
+        s.cameraShake = Math.max(s.cameraShake, 6 + Math.sin(s.time * 0.3) * 4);
+        break;
+      }
+    }
+
+    if (s.activeEvent.timer <= 0) {
+      // Cleanup: restore police car color
+      if (s.activeEvent.type === 'policeChase' && s.activeEvent.data?.carIdx !== undefined) {
+        const cidx = s.activeEvent.data.carIdx;
+        const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b'];
+        if (s.trafficCars[cidx]) s.trafficCars = s.trafficCars.map((c, i) => i === cidx ? { ...c, color: colors[Math.floor(Math.random() * colors.length)] } : c);
+      }
+      s.activeEvent = null;
+      s.eventCooldown = 360; // 6 sec cooldown
+    }
+    return;
+  }
+
+  // Cooldown
+  if (s.eventCooldown > 0) { s.eventCooldown--; return; }
+
+  // Roll for event every ~8 seconds
+  if (s.time % 480 !== 240) return;
+  if (Math.random() > 0.55) return;
+
+  const roll = Math.random();
+  if (roll < 0.18) {
+    // Traffic Jam
+    const tx = clamp(amb.x + Math.cos(amb.angle) * 300, 100, cs - 100);
+    const ty = clamp(amb.y + Math.sin(amb.angle) * 300, 100, cs - 100);
+    s.activeEvent = { type: 'trafficJam', timer: 180, x: tx, y: ty };
+    s.flashMessages = [...(s.flashMessages || []), { text: '🚗 ПРОБКА ВПЕРЕДИ!', timer: 90, color: '#f59e0b' }];
+    audio.push('event');
+  } else if (roll < 0.32) {
+    // Road Block
+    const tx = clamp(amb.x + Math.cos(amb.angle) * 250, 100, cs - 100);
+    const ty = clamp(amb.y + Math.sin(amb.angle) * 250, 100, cs - 100);
+    s.barriers = [...(s.barriers || []), { x: tx - 40, y: ty - 10, w: 80, h: 20, health: 50, type: 'construction' as HazardType }];
+    s.activeEvent = { type: 'roadBlock', timer: 240, x: tx, y: ty };
+    s.flashMessages = [...(s.flashMessages || []), { text: '🚧 ДОРОГА ПЕРЕКРЫТА!', timer: 90, color: '#ef4444' }];
+    s.cameraShake = 5;
+    audio.push('event');
+  } else if (roll < 0.46) {
+    // Patient Sprint
+    const uncaught = s.patients.filter(p => !p.caught);
+    if (uncaught.length > 0) {
+      const p = uncaught[Math.floor(Math.random() * uncaught.length)];
+      const pidx = s.patients.indexOf(p);
+      s.activeEvent = { type: 'patientSprint', timer: 180, x: p.x, y: p.y, data: { patIdx: pidx } };
+      s.flashMessages = [...(s.flashMessages || []), { text: `${p.story.emoji} ${p.story.name} в ПАНИКЕ!`, timer: 60, color: p.story.color }];
+      audio.push('event');
+    }
+  } else if (roll < 0.58) {
+    // Police Chase
+    if (s.trafficCars.length > 0) {
+      let nearest = 0, minD = Infinity;
+      s.trafficCars.forEach((c, i) => { const d = dist(c.x, c.y, amb.x, amb.y); if (d < minD) { minD = d; nearest = i; } });
+      s.activeEvent = { type: 'policeChase', timer: 600, x: 0, y: 0, data: { carIdx: nearest } };
+      s.trafficCars = s.trafficCars.map((c, i) => i === nearest ? { ...c, color: '#1e40af' } : c);
+      s.flashMessages = [...(s.flashMessages || []), { text: '🚔 ПОЛИЦИЯ! УХОДИМ!', timer: 90, color: '#1e40af' }];
+      audio.push('event');
+    }
+  } else if (roll < 0.70) {
+    // Earthquake
+    s.activeEvent = { type: 'earthquake', timer: 180, x: 0, y: 0 };
+    s.cameraShake = 15;
+    s.flashMessages = [...(s.flashMessages || []), { text: '🌍 ЗЕМЛЕТРЯСЕНИЕ!', timer: 90, color: '#ef4444' }];
+    newP.push(...spawnParticles(amb.x, amb.y, '#ef4444', 15, 'spark'));
+    audio.push('event');
+  } else if (roll < 0.84) {
+    // Blackout
+    s.activeEvent = { type: 'blackout', timer: 300, x: 0, y: 0 };
+    s.flashMessages = [...(s.flashMessages || []), { text: '💡 БЛЭКАУТ!', timer: 90, color: '#6b7280' }];
+    audio.push('event');
+  } else {
+    // Breakdown
+    s.activeEvent = { type: 'breakdown', timer: 180, x: 0, y: 0 };
+    s.flashMessages = [...(s.flashMessages || []), { text: '🔧 ПОЛОМКА ДВИГАТЕЛЯ!', timer: 90, color: '#f59e0b' }];
+    audio.push('event');
+  }
+}
+
+// ============ NEAR-MISS SYSTEM ============
+
+function processNearMiss(s: GameState, amb: Ambulance, spd: number, audio: string[], newP: Particle[]): void {
+  if (s.nearMissTimer > 0) { s.nearMissTimer--; }
+
+  let gotNearMiss = false;
+  for (const tc of s.trafficCars) {
+    const td = dist(tc.x, tc.y, amb.x, amb.y);
+    if (td > 25 && td < 55 && spd > 3) {
+      gotNearMiss = true;
+      break;
+    }
+  }
+
+  if (gotNearMiss && s.nearMissTimer <= 0) {
+    s.nearMissCombo++;
+    s.nearMissTimer = 30;
+    const bonus = 50 * s.nearMissCombo;
+    s.score += bonus;
+    s.money += Math.floor(bonus / 5);
+    newP.push(...spawnParticles(amb.x, amb.y, '#a855f7', 5, 'spark'));
+    const comboText = s.nearMissCombo > 1 ? ` x${s.nearMissCombo}!` : '!';
+    s.flashMessages = [...(s.flashMessages || []), { text: `😎 МАСТЕРСТВО +${bonus}${comboText}`, timer: 45, color: '#a855f7' }];
+    audio.push('nearmiss');
+  }
+
+  // Reset combo after 3 seconds of no near-miss
+  if (!gotNearMiss && s.nearMissCombo > 0 && s.time % 180 === 0) {
+    s.nearMissCombo = 0;
+  }
+}
+
+// ============ DRIFT SYSTEM ============
+
+function processDrift(s: GameState, amb: Ambulance, prevAngle: number, spd: number, maxSpd: number, audio: string[], newP: Particle[]): void {
+  const angleDelta = Math.abs(amb.angle - prevAngle);
+  const normalized = angleDelta > Math.PI ? Math.PI * 2 - angleDelta : angleDelta;
+
+  if (spd > maxSpd * 0.55 && normalized > 0.12) {
+    s.driftTimer = Math.min(60, (s.driftTimer || 0) + 2);
+    s.isDrifting = true;
+    if (s.time % 2 === 0) {
+      newP.push({ x: amb.x - Math.cos(amb.angle) * 15, y: amb.y - Math.sin(amb.angle) * 15, vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3, life: 60, maxLife: 60, color: 'rgba(80,80,80,0.6)', size: 4, type: 'smoke' });
+    }
+  } else {
+    if (s.driftTimer > 15) {
+      const boost = 1 + Math.min(s.driftTimer, 45) * 0.015;
+      amb.vx *= boost; amb.vy *= boost;
+      const pts = Math.floor(s.driftTimer * 2);
+      s.score += pts;
+      s.flashMessages = [...(s.flashMessages || []), { text: `🏎 ДРИФТ! +${pts}`, timer: 45, color: '#f59e0b' }];
+      newP.push(...spawnParticles(amb.x, amb.y, '#f59e0b', 8, 'spark'));
+      audio.push('nearmiss');
+    }
+    s.driftTimer = 0;
+    s.isDrifting = false;
+  }
 }
 
 function updateAmbulanceMode(state: GameState, dt: number): GameState {
@@ -992,10 +1190,12 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
   const audio: string[] = [];
 
   const amb = { ...state.ambulance };
+  const prevAngle = amb.angle;
   const nitroActive = amb.nitroTimer > 0;
   const coffeeActive = amb.coffeeTimer > 0;
-  const accel = amb.acceleration * (nitroActive ? 2.0 : 1.0);
-  const maxSpd = amb.maxSpeed * (nitroActive ? 1.6 : 1.0);
+  const breakdownActive = s.activeEvent?.type === 'breakdown';
+  const accel = amb.acceleration * (nitroActive ? 2.0 : 1.0) * (breakdownActive ? 0.5 : 1.0);
+  const maxSpd = amb.maxSpeed * (nitroActive ? 1.6 : 1.0) * (breakdownActive ? 0.5 : 1.0);
   const friction = coffeeActive ? 0.96 : amb.handling;
   const wf = state.weather === 'rain' ? 0.985 : 1.0;
 
@@ -1037,7 +1237,7 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
   if (spd > 3 && s.time % 3 === 0) newP.push(...spawnParticles(nx - Math.cos(amb.angle) * 20, ny - Math.sin(amb.angle) * 20, nitroActive ? '#3b82f6' : '#9ca3af', 1, 'smoke'));
 
   // Traffic
-  s.trafficCars = state.trafficCars.map(car => {
+  s.trafficCars = state.trafficCars.map((car, i) => {
     const c = { ...car };
     c.x += c.vx; c.y += c.vy;
     if (c.x < -200) c.x = cs + 200; if (c.x > cs + 200) c.x = -200;
@@ -1049,10 +1249,22 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
     }
     const d = dist(c.x, c.y, amb.x, amb.y);
     if (d < 150 + state.upgrades.siren * 50 && amb.sirenOn) { const dx = c.x - amb.x; const dy = c.y - amb.y; const len = Math.sqrt(dx * dx + dy * dy) || 1; c.x += (dx / len) * 2; c.y += (dy / len) * 2; if (c.honkTimer <= 0) c.honkTimer = 30; }
+    // Aggressive blockers: ~17% of cars steer toward player
+    if (i % 6 === 0 && d < 300 && d > 40) { const dx = amb.x - c.x; const dy = amb.y - c.y; const len = Math.sqrt(dx * dx + dy * dy) || 1; c.vx += (dx / len) * 0.25; c.vy += (dy / len) * 0.25; }
     if (c.honkTimer > 0) c.honkTimer--;
+    // Honk when close
+    if (d < 100 && c.honkTimer <= 0) c.honkTimer = 60;
     if (d < 35) { amb.vx += (amb.x - c.x) * 0.08; amb.vy += (amb.y - c.y) * 0.08; c.vx -= (amb.x - c.x) * 0.04; c.vy -= (amb.y - c.y) * 0.04; if (colCD <= 0) { amb.health -= 1; s.cameraShake = Math.max(s.cameraShake, 3); s.collisionCooldown = 10; } }
     return c;
   });
+
+  // Spawn extra traffic when time is low (urgency)
+  if (s.timeLeft < 15 && s.time % 120 === 0 && s.trafficCars.length < 45) {
+    const pos = findRoadPosition(cs, state.buildings);
+    const cc = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b'];
+    const horiz = Math.random() < 0.5;
+    s.trafficCars = [...s.trafficCars, { x: pos.x, y: pos.y, vx: horiz ? (Math.random() < 0.5 ? 1 : -1) * 2.5 : 0, vy: horiz ? 0 : (Math.random() < 0.5 ? 1 : -1) * 2.5, angle: 0, color: cc[Math.floor(Math.random() * cc.length)], width: 50, height: 28, lane: 0, honkTimer: 0 }];
+  }
 
   // Patients
   s.patients = state.patients.map(p => {
@@ -1062,9 +1274,18 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
     pat.panicLevel = clamp(pat.panicLevel + (d < 200 ? 0.02 : -0.01), 0, 1);
     if (pat.stunTimer > 0) { pat.stunTimer -= dt; pat.vx *= 0.9; pat.vy *= 0.9; pat.x += pat.vx; pat.y += pat.vy; return pat; }
 
-    const pSpd = (1.5 + pat.story.speed * (mission.difficulty * 0.12)) * (1 + pat.panicLevel * 1.2);
+    // Patient sprint event: double speed
+    const sprintMult = (s.activeEvent?.type === 'patientSprint' && s.activeEvent.data?.patIdx === state.patients.indexOf(p)) ? 2.0 : 1.0;
+    const pSpd = (1.5 + pat.story.speed * (mission.difficulty * 0.12)) * (1 + pat.panicLevel * 1.2) * sprintMult;
     pat.dialogueTimer -= 1;
-    if (pat.dialogueTimer <= 0) { pat.currentDialogue = pat.story.dialogue[Math.floor(Math.random() * pat.story.dialogue.length)]; pat.dialogueTimer = 120 + Math.random() * 180; }
+    // More frequent dialogue when health is low (calling for help)
+    const maxDialogueWait = pat.health < 40 ? 60 + Math.random() * 60 : 120 + Math.random() * 180;
+    if (pat.dialogueTimer <= 0) { pat.currentDialogue = pat.health < 30 ? 'Помогите...' : pat.story.dialogue[Math.floor(Math.random() * pat.story.dialogue.length)]; pat.dialogueTimer = maxDialogueWait; }
+    // Hiding: high panic + far from ambulance = stop moving
+    if (pat.panicLevel > 0.7 && d > 350 && Math.random() < 0.003) {
+      pat.stunTimer = 2.5; pat.currentDialogue = 'Спрячусь здесь...'; pat.dialogueTimer = 90;
+      return pat;
+    }
     if (d < 250) { pat.angle = Math.atan2(pat.y - amb.y, pat.x - amb.x) + (Math.random() - 0.5) * pat.story.erratic; }
     else if (Math.random() < 0.02) { pat.angle += (Math.random() - 0.5) * 2; }
 
@@ -1138,8 +1359,8 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
     return pu;
   });
 
-  // === RANDOM EVENTS ===
-  // Time bonus for speed: driving fast near patients without crashing
+  // === DYNAMIC EVENTS + NEAR-MISS + DRIFT ===
+  // Speed bonus (kept simple)
   if (spd > maxSpd * 0.7 && s.time % 120 === 0 && !hitB) {
     s.score += 50;
     newP.push(...spawnParticles(amb.x, amb.y, '#fbbf24', 5, 'star'));
@@ -1147,35 +1368,15 @@ function updateAmbulanceMode(state: GameState, dt: number): GameState {
   }
   // Combo streak reward
   if (s.comboCount >= 3 && s.comboTimer === 179) {
-    s.timeLeft += 3;
-    s.money += 30;
+    s.timeLeft += 3; s.money += 30;
     s.flashMessages = [...(s.flashMessages || []), { text: `🔥 КОМБО x${s.comboCount}! +3сек +💰30`, timer: 90, color: '#c084fc' }];
   }
-  // Random time bonus events (every ~10 seconds)
-  if (s.time % 600 === 300 && s.screen === 'playing') {
-    const eventRoll = Math.random();
-    if (eventRoll < 0.25) {
-      s.timeLeft += 5;
-      s.flashMessages = [...(s.flashMessages || []), { text: '🎁 Зелёная волна! +5 сек', timer: 90, color: '#22c55e' }];
-      newP.push(...spawnParticles(amb.x, amb.y, '#22c55e', 15, 'star'));
-    } else if (eventRoll < 0.4) {
-      const heal = Math.min(20, 100 + (s.upgrades.armor || 0) * 25 - amb.health);
-      if (heal > 0) { amb.health += heal; s.flashMessages = [...(s.flashMessages || []), { text: `🔧 Мастерская! +${heal} HP`, timer: 90, color: '#3b82f6' }]; }
-    } else if (eventRoll < 0.55) {
-      s.money += 25;
-      s.flashMessages = [...(s.flashMessages || []), { text: '💵 Чаевые! +25💰', timer: 60, color: '#fbbf24' }];
-    }
-  }
-  // Near-miss bonus: drive close to traffic without hitting
-  for (const tc of s.trafficCars) {
-    const td = dist(tc.x, tc.y, amb.x, amb.y);
-    if (td > 30 && td < 55 && spd > 3 && s.time % 60 === 0) {
-      s.score += 25;
-      newP.push(...spawnParticles(amb.x, amb.y, '#a855f7', 3, 'spark'));
-      s.flashMessages = [...(s.flashMessages || []), { text: '😎 Мастерство! +25', timer: 45, color: '#a855f7' }];
-      break;
-    }
-  }
+  // Dynamic events system
+  processDynamicEvents(s, amb, audio, newP);
+  // Near-miss combo
+  processNearMiss(s, amb, spd, audio, newP);
+  // Drift mechanic
+  processDrift(s, amb, prevAngle, spd, maxSpd, audio, newP);
 
   s.timeLeft -= dt;
   if (s.timeLeft <= 0 && s.screen === 'playing') { s.timeLeft = 0; s.screen = 'failed'; s.totalFailed++; s.reputation = clamp(s.reputation - 10, 0, 100); s.currentDialogue = 'Время вышло...'; audio.push('fail'); }
@@ -1412,6 +1613,11 @@ function updateCoopRescue(state: GameState, dt: number): GameState {
     }
     return pu;
   });
+
+  // Dynamic events + near-miss + drift (coop)
+  processDynamicEvents(s, updatedAmb1, audio, newP);
+  const spd1 = Math.sqrt(updatedAmb1.vx ** 2 + updatedAmb1.vy ** 2);
+  processNearMiss(s, updatedAmb1, spd1, audio, newP);
 
   // Win/lose conditions
   if (s.patients.every(p => p.caught)) { s.screen = 'saved'; audio.push('win'); }

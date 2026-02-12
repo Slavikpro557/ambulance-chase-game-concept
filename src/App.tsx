@@ -5,6 +5,12 @@ import { render, renderMenu, renderBriefing, renderRunnerBriefing, renderSaved, 
 import { gameAudio } from './game/audio';
 import { GameNetwork, NetMessage } from './game/net';
 import { serializeKeys, deserializeKeys, createSnapshot, serializeSnapshot, deserializeSnapshot, createFullSyncPayload, applySnapshotToState, applyFullSyncPayload, interpolateSnapshots } from './game/netSync';
+import { MP_MISSIONS } from './game/mpMissions';
+
+/** Get the right mission array based on whether we're in multiplayer coopRescue */
+function getMissions(state: GameState): typeof MISSIONS {
+  return (state.mp?.isMultiplayer && state.mp.multiplayerMode === 'coopRescue') ? MP_MISSIONS : MISSIONS;
+}
 
 interface JoystickState {
   active: boolean; startX: number; startY: number;
@@ -1167,7 +1173,7 @@ export function App() {
           if (mp.prevSnapshot && mp.currSnapshot) {
             const elapsed = performance.now() - mp.snapshotTime;
             const snapInterval = 100; // ~10Hz = 100ms between snapshots
-            const t = Math.min(1.5, elapsed / snapInterval);
+            const t = Math.min(1.0, elapsed / snapInterval);
             const interpolated = interpolateSnapshots(mp.prevSnapshot, mp.currSnapshot, t);
             stateRef.current = applySnapshotToState(stateRef.current, interpolated);
           } else if (mp.currSnapshot) {
@@ -1197,7 +1203,7 @@ export function App() {
               // Success → advance mission index and go to UPGRADE screen
               const nextMission = currentMission + 1;
               // Check if all missions done
-              if (nextMission >= MISSIONS.length) {
+              if (nextMission >= getMissions(stateRef.current).length) {
                 // Victory!
                 stateRef.current = {
                   ...stateRef.current,
