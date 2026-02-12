@@ -1434,58 +1434,49 @@ export function App() {
     }
   }, []);
 
+  const pasteInputRef = useRef<HTMLInputElement>(null);
+
+  const processPastedText = useCallback((text: string) => {
+    if (!text) return;
+    const validChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const cleaned = text.toUpperCase().split('').filter(c => validChars.includes(c)).join('').slice(0, 6);
+    if (cleaned.length === 0) return;
+    const s2 = stateRef.current;
+    if (!s2.mp) return;
+    stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: cleaned, inputError: '' } };
+    setForceUpdate(v => v + 1);
+    if (cleaned.length === 6 && networkRef.current) {
+      networkRef.current.joinRoom(cleaned).catch((err) => {
+        const s3 = stateRef.current;
+        if (s3.mp) {
+          const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
+          stateRef.current = { ...s3, mp: { ...s3.mp, inputCode: '', inputError: errMsg } };
+          setForceUpdate(v => v + 1);
+        }
+      });
+    }
+  }, []);
+
   const handleMobilePaste = useCallback(async () => {
     const s = stateRef.current;
     if (!s.mp) return;
-    const validChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    // Strategy 1: Clipboard API (works on most Android, some iOS)
     try {
-      let text = '';
       if (navigator.clipboard?.readText) {
-        text = await navigator.clipboard.readText();
+        const text = await navigator.clipboard.readText();
+        if (text) { processPastedText(text); return; }
       }
-      if (!text) return;
-      // Filter to valid chars only, take up to 6
-      const cleaned = text.toUpperCase().split('').filter(c => validChars.includes(c)).join('').slice(0, 6);
-      if (cleaned.length === 0) return;
-      const s2 = stateRef.current;
-      if (!s2.mp) return;
-      stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: cleaned, inputError: '' } };
-      setForceUpdate(v => v + 1);
-      if (cleaned.length === 6 && networkRef.current) {
-        networkRef.current.joinRoom(cleaned).catch((err) => {
-          const s3 = stateRef.current;
-          if (s3.mp) {
-            const errMsg = networkRef.current?.lastError || err?.message || 'Комната не найдена';
-            stateRef.current = { ...s3, mp: { ...s3.mp, inputCode: '', inputError: errMsg } };
-            setForceUpdate(v => v + 1);
-          }
-        });
-      }
-    } catch {
-      // Clipboard API failed — try input element
-      if (copyInputRef.current) {
-        const inp = copyInputRef.current;
-        inp.value = '';
-        inp.style.display = 'block';
-        inp.readOnly = false;
-        inp.focus();
-        try { document.execCommand('paste'); } catch {}
-        const text = inp.value;
-        inp.readOnly = true;
-        inp.style.display = 'none';
-        if (text) {
-          const cleaned = text.toUpperCase().split('').filter(c => validChars.includes(c)).join('').slice(0, 6);
-          if (cleaned.length > 0) {
-            const s2 = stateRef.current;
-            if (s2.mp) {
-              stateRef.current = { ...s2, mp: { ...s2.mp, inputCode: cleaned, inputError: '' } };
-              setForceUpdate(v => v + 1);
-            }
-          }
-        }
-      }
+    } catch { /* not allowed */ }
+    // Strategy 2: Focus a real visible input so user can long-press → paste
+    // On iOS, programmatic paste doesn't work — we need to show an input
+    if (pasteInputRef.current) {
+      const inp = pasteInputRef.current;
+      inp.value = '';
+      inp.focus();
+      // On iOS the keyboard will appear and user can paste manually
+      // We listen for input event to catch the paste
     }
-  }, []);
+  }, [processPastedText]);
 
   const handleMobileCopy = useCallback(() => {
     const code = stateRef.current.mp?.roomCode;
@@ -1566,13 +1557,38 @@ export function App() {
               }}>{ch}</button>
             ))}
           </div>
-          {/* Paste + Backspace + Back buttons */}
-          <div style={{ display: 'flex', gap: '8px', width: '100%', maxWidth: '360px' }}>
+          {/* Paste input field — visible, user can tap and paste */}
+          <div style={{ display: 'flex', gap: '6px', width: '100%', maxWidth: '360px', alignItems: 'center' }}>
+            <input
+              ref={pasteInputRef}
+              type="text"
+              inputMode="text"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="Вставь код сюда"
+              maxLength={6}
+              style={{
+                flex: 2, padding: '12px', borderRadius: '8px', border: '2px solid #3b82f6',
+                background: 'rgba(30,41,59,0.95)', color: '#34d399', fontSize: '18px',
+                fontWeight: 'bold', fontFamily: 'monospace', textAlign: 'center',
+                outline: 'none', letterSpacing: '4px',
+              }}
+              onInput={(e) => {
+                const val = (e.target as HTMLInputElement).value;
+                processPastedText(val);
+                (e.target as HTMLInputElement).value = '';
+              }}
+            />
             <button onClick={handleMobilePaste} style={{
               flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
               background: 'rgba(59,130,246,0.7)', color: '#fff', fontSize: '14px',
               fontWeight: 'bold', cursor: 'pointer', touchAction: 'manipulation',
-            }}>📋 Вставить</button>
+            }}>📋</button>
+          </div>
+          {/* Backspace + Back buttons */}
+          <div style={{ display: 'flex', gap: '8px', width: '100%', maxWidth: '360px' }}>
             <button onClick={() => handleMobileKeyPress('DEL')} style={{
               flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
               background: 'rgba(239,68,68,0.6)', color: '#fff', fontSize: '14px',
