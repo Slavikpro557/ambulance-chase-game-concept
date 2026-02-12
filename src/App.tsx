@@ -165,6 +165,8 @@ export function App() {
               const newState = applyFullSyncPayload(s, payload, s.mp.multiplayerMode);
               stateRef.current = newState;
               setForceUpdate(v => v + 1);
+              // Send ACK so host knows fullSync was received
+              net.sendReliable({ type: 'syncAck', seq: 0, ts: performance.now(), data: { buildings: payload.buildings?.length ?? 0 } });
             } catch (err) {
               console.error('Failed to apply full sync:', err);
             }
@@ -361,13 +363,29 @@ export function App() {
     stateRef.current = newState;
     gameAudio.siren(true);
 
-    // Send full sync to guest
+    // Send full sync to guest with retry
     const payload = createFullSyncPayload(newState);
-    net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: payload });
-    // Then tell guest to start
+    let syncAcked = false;
+    const sendFullSync = () => {
+      net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: payload });
+    };
+    sendFullSync();
+    // Retry fullSync 3 times if no ACK (500ms, 1s, 2s)
+    const retryTimers = [
+      setTimeout(() => { if (!syncAcked) sendFullSync(); }, 500),
+      setTimeout(() => { if (!syncAcked) sendFullSync(); }, 1200),
+      setTimeout(() => { if (!syncAcked) sendFullSync(); }, 2500),
+    ];
+    // Listen for ACK (handled in message handler, set flag via closure)
+    const origHandler = net.onMessage;
+    net.onMessage = (msg) => {
+      if (msg.type === 'syncAck') { syncAcked = true; retryTimers.forEach(t => clearTimeout(t)); net.onMessage = origHandler; }
+      if (origHandler) origHandler(msg);
+    };
+    // Tell guest to start (after short delay to let fullSync arrive first)
     setTimeout(() => {
       net.sendReliable({ type: 'start', seq: 0, ts: performance.now(), data: null });
-    }, 100);
+    }, 150);
 
     setForceUpdate(v => v + 1);
   }, []);

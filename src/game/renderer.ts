@@ -162,12 +162,36 @@ export function render(ctx: CanvasRenderingContext2D, state: GameState) {
   }
 
   // Blackout event vignette
+  // Blackout — nearly full darkness with tiny visible radius
   if (state.activeEvent?.type === 'blackout') {
-    const blackAlpha = Math.min(0.85, 0.85 * Math.min(1, state.activeEvent.timer / 30));
-    const blackVig = ctx.createRadialGradient(w / 2, h / 2, 50, w / 2, h / 2, Math.max(w, h) * 0.55);
+    const fadeIn = Math.min(1, state.activeEvent.timer / 30);
+    // Almost complete darkness: tiny 80px visible circle, rest is black
+    const blackVig = ctx.createRadialGradient(w / 2, h / 2, 60, w / 2, h / 2, 160);
     blackVig.addColorStop(0, 'rgba(0,0,0,0)');
-    blackVig.addColorStop(1, `rgba(0,0,0,${blackAlpha})`);
+    blackVig.addColorStop(0.4, `rgba(0,0,0,${0.5 * fadeIn})`);
+    blackVig.addColorStop(1, `rgba(0,0,0,${0.92 * fadeIn})`);
     ctx.fillStyle = blackVig; ctx.fillRect(0, 0, w, h);
+  }
+
+  // Breakdown — red tint overlay
+  if (state.activeEvent?.type === 'breakdown') {
+    ctx.fillStyle = 'rgba(255,100,0,0.08)';
+    ctx.fillRect(0, 0, w, h);
+    // Smoke particles from ambulance position (drawn as smudge)
+    if (state.time % 3 === 0) {
+      ctx.fillStyle = 'rgba(100,100,100,0.15)';
+      ctx.beginPath();
+      ctx.arc(w / 2 + (Math.random() - 0.5) * 30, h / 2 - 20, 8 + Math.random() * 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Police chase — blue/red flashing border
+  if (state.activeEvent?.type === 'policeChase') {
+    const flash = Math.sin(state.time * 0.3) > 0;
+    ctx.strokeStyle = flash ? 'rgba(30,64,175,0.5)' : 'rgba(220,38,38,0.5)';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, w - 4, h - 4);
   }
 
   // Event progress bar (thin colored bar at top)

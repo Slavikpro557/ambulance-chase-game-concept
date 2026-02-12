@@ -79,7 +79,8 @@ export type NetMessageType =
   | 'briefing'       // host→guest: show briefing for mission N
   | 'upgrade'        // host→guest: show upgrade screen with data
   | 'upgradeChoice'  // guest→host: guest selected an upgrade
-  | 'ready';         // both: player is ready (briefing/upgrade)
+  | 'ready'          // both: player is ready (briefing/upgrade)
+  | 'syncAck';       // guest→host: fullSync received successfully
 
 export interface NetMessage {
   type: NetMessageType;
@@ -319,16 +320,24 @@ export class GameNetwork {
   sendReliable(msg: NetMessage) {
     if (!this.dataConn?.open) return;
     // Buffer overflow protection: skip non-critical messages if buffer is full
-    try {
-      const dc = (this.dataConn as any)._dc || (this.dataConn as any).dataChannel;
-      if (dc && dc.bufferedAmount > 64 * 1024) {
-        // Buffer > 64KB — skip snapshots and keys, keep critical messages
-        if (msg.type === 'snapshot' || msg.type === 'keys') return;
-      }
-    } catch { /* ignore */ }
+    // Critical messages (fullSync, start, briefing, ready, etc.) ALWAYS get through
+    const isCritical = msg.type !== 'snapshot' && msg.type !== 'keys' && msg.type !== 'ping' && msg.type !== 'pong';
+    if (!isCritical) {
+      try {
+        const dc = (this.dataConn as any)._dc || (this.dataConn as any).dataChannel;
+        if (dc && dc.bufferedAmount > 128 * 1024) return; // 128KB buffer limit for non-critical
+      } catch { /* ignore */ }
+    }
     try {
       this.dataConn.send(msg);
-    } catch { /* channel closed */ }
+    } catch (e) {
+      // If critical message fails, retry after a short delay
+      if (isCritical) {
+        setTimeout(() => {
+          try { this.dataConn?.send(msg); } catch { /* give up */ }
+        }, 200);
+      }
+    }
   }
 
   sendUnreliable(msg: NetMessage) {
