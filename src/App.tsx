@@ -186,11 +186,19 @@ export function App() {
           break;
         }
         case 'start': {
-          // Guest: game is starting
+          // Guest: game is starting — only apply if fullSync already set us to playing
           if (s.mp.netRole === 'guest') {
-            stateRef.current = { ...s, screen: 'playing' };
-            gameAudio.siren(true);
-            setForceUpdate(v => v + 1);
+            const cur = stateRef.current;
+            if (cur.screen === 'playing') {
+              // fullSync already applied — just ensure siren is on
+              gameAudio.siren(true);
+            } else {
+              // fullSync set screen to 'playing' via applyFullSyncPayload,
+              // but if somehow we're not playing yet, set it now
+              stateRef.current = { ...cur, screen: 'playing' };
+              gameAudio.siren(true);
+              setForceUpdate(v => v + 1);
+            }
           }
           break;
         }
@@ -382,29 +390,47 @@ export function App() {
     stateRef.current = newState;
     gameAudio.siren(true);
 
-    // Send full sync to guest with retry
+    // Send full sync to guest with retry — wait for ACK before sending start
     const payload = createFullSyncPayload(newState);
     let syncAcked = false;
     const sendFullSync = () => {
       net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: payload });
     };
     sendFullSync();
-    // Retry fullSync 3 times if no ACK (500ms, 1s, 2s)
+
+    const sendStart = () => {
+      net.sendReliable({ type: 'start', seq: 0, ts: performance.now(), data: null });
+    };
+
+    // Poll for ACK then send start (check every 50ms, up to 5s)
+    let ackChecks = 0;
+    const checkAckAndStart = () => {
+      if (syncAcked) {
+        sendStart();
+        return;
+      }
+      ackChecks++;
+      if (ackChecks >= 100) {
+        // 5s timeout — send start anyway as fallback
+        sendStart();
+        return;
+      }
+      setTimeout(checkAckAndStart, 50);
+    };
+    setTimeout(checkAckAndStart, 100);
+
+    // Retry fullSync if no ACK (500ms, 1.2s, 2.5s)
     const retryTimers = [
       setTimeout(() => { if (!syncAcked) sendFullSync(); }, 500),
       setTimeout(() => { if (!syncAcked) sendFullSync(); }, 1200),
       setTimeout(() => { if (!syncAcked) sendFullSync(); }, 2500),
     ];
-    // Listen for ACK (handled in message handler, set flag via closure)
+    // Listen for ACK
     const origHandler = net.onMessage;
     net.onMessage = (msg) => {
       if (msg.type === 'syncAck') { syncAcked = true; retryTimers.forEach(t => clearTimeout(t)); net.onMessage = origHandler; }
       if (origHandler) origHandler(msg);
     };
-    // Tell guest to start (after short delay to let fullSync arrive first)
-    setTimeout(() => {
-      net.sendReliable({ type: 'start', seq: 0, ts: performance.now(), data: null });
-    }, 150);
 
     setForceUpdate(v => v + 1);
   }, []);
