@@ -1,4 +1,4 @@
-import { GameState, Patient, TrafficCar, Building, PowerUp, Particle, Ambulance, Upgrades, RunnerPlayer, GameMode, Hazard, Barrier, HazardType, SaveData, DynamicEvent, DynamicEventType } from './types';
+import { GameState, Patient, TrafficCar, Building, PowerUp, Particle, Ambulance, Upgrades, RunnerPlayer, GameMode, Hazard, Barrier, HazardType, SaveData, DynamicEvent, DynamicEventType, Friend } from './types';
 import { MISSIONS } from './missions';
 import { SpatialGrid } from './spatial';
 
@@ -320,6 +320,57 @@ export function loadProgress(): SaveData | null {
 
 export function clearProgress(): void {
   try { localStorage.removeItem('ambulance-save'); } catch { /* noop */ }
+}
+
+// === FRIENDS ===
+
+export function getOrCreateFriendId(): string {
+  try {
+    let id = localStorage.getItem('ambulance-friend-id');
+    if (id) return id;
+    id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    localStorage.setItem('ambulance-friend-id', id);
+    return id;
+  } catch { return 'anon-' + Math.random().toString(36).slice(2, 8); }
+}
+
+export function loadFriends(): Friend[] {
+  try {
+    const raw = localStorage.getItem('ambulance-friends');
+    if (!raw) return [];
+    return JSON.parse(raw) as Friend[];
+  } catch { return []; }
+}
+
+export function saveFriends(friends: Friend[]): void {
+  try {
+    const trimmed = friends.slice(0, 20); // max 20 friends
+    localStorage.setItem('ambulance-friends', JSON.stringify(trimmed));
+  } catch { /* noop */ }
+}
+
+export function addOrUpdateFriend(friendId: string, name: string, roomCode: string): Friend[] {
+  const friends = loadFriends();
+  const existing = friends.find(f => f.id === friendId);
+  if (existing) {
+    existing.name = name;
+    existing.lastCode = roomCode;
+    existing.lastPlayed = Date.now();
+    existing.gamesPlayed++;
+  } else {
+    friends.unshift({ id: friendId, name, lastCode: roomCode, lastPlayed: Date.now(), gamesPlayed: 1 });
+  }
+  // Sort by last played (most recent first), cap at 20
+  friends.sort((a, b) => b.lastPlayed - a.lastPlayed);
+  const result = friends.slice(0, 20);
+  saveFriends(result);
+  return result;
+}
+
+export function removeFriend(friendId: string): Friend[] {
+  const friends = loadFriends().filter(f => f.id !== friendId);
+  saveFriends(friends);
+  return friends;
 }
 
 export function createInitialStateWithSave(): GameState {
@@ -1541,10 +1592,12 @@ function updateCoopRescue(state: GameState, dt: number): GameState {
   const k2 = mp.remotePlayer.keys; // Guest keys (P2)
 
   const amb1 = { ...state.ambulance };
+  const prevAngle1 = amb1.angle;
   const { amb: updatedAmb1 } = updateAmbulancePhysics(amb1, k1, state, dt, audio, newP);
   s.ambulance = updatedAmb1;
 
   const amb2 = { ...(mp.ambulance2 || state.ambulance) };
+  const prevAngle2 = amb2.angle;
   const { amb: updatedAmb2 } = updateAmbulancePhysics(amb2, k2, state, dt, audio, newP);
 
   // Ambulance-ambulance collision (no damage, just push)
@@ -1645,7 +1698,13 @@ function updateCoopRescue(state: GameState, dt: number): GameState {
   // Dynamic events + near-miss + drift (coop)
   processDynamicEvents(s, updatedAmb1, audio, newP);
   const spd1 = Math.sqrt(updatedAmb1.vx ** 2 + updatedAmb1.vy ** 2);
+  const maxSpd1 = updatedAmb1.maxSpeed * (updatedAmb1.nitroTimer > 0 ? 1.6 : 1.0);
   processNearMiss(s, updatedAmb1, spd1, audio, newP);
+  processDrift(s, updatedAmb1, prevAngle1, spd1, maxSpd1, audio, newP);
+  const spd2 = Math.sqrt(updatedAmb2.vx ** 2 + updatedAmb2.vy ** 2);
+  const maxSpd2 = updatedAmb2.maxSpeed * (updatedAmb2.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, updatedAmb2, spd2, audio, newP);
+  processDrift(s, updatedAmb2, prevAngle2, spd2, maxSpd2, audio, newP);
 
   // Win/lose conditions
   if (s.patients.every(p => p.caught)) { s.screen = 'saved'; audio.push('win'); }
@@ -1680,6 +1739,7 @@ function updateCopsAndRobbers(state: GameState, dt: number): GameState {
 
   // P1: ambulance (host keys)
   const amb = { ...state.ambulance };
+  const prevAngle = amb.angle;
   const { amb: updatedAmb } = updateAmbulancePhysics(amb, state.keys, state, dt, audio, newP);
   s.ambulance = updatedAmb;
 
@@ -1688,11 +1748,16 @@ function updateCopsAndRobbers(state: GameState, dt: number): GameState {
   runner = updateRunnerPhysics(runner, mp.remotePlayer.keys, state, dt);
   mp.runner2 = runner;
 
-  // Traffic
+  // Traffic (with building collisions)
   s.trafficCars = state.trafficCars.map(car => {
     const c = { ...car }; c.x += c.vx; c.y += c.vy;
     if (c.x < -200) c.x = cs + 200; if (c.x > cs + 200) c.x = -200;
     if (c.y < -200) c.y = cs + 200; if (c.y > cs + 200) c.y = -200;
+    const nearCarBldgs = state.buildingGrid ? state.buildingGrid.queryNear(c.x, c.y, 50) : state.buildings;
+    for (const b of nearCarBldgs) {
+      const r = resolveRectCollision(c.x - c.width / 2, c.y - c.height / 2, c.width, c.height, b.x, b.y, b.w, b.h);
+      if (r.hit) { c.x += r.dx; c.y += r.dy; if (r.dx !== 0) c.vx = -c.vx; if (r.dy !== 0) c.vy = -c.vy; }
+    }
     return c;
   });
 
@@ -1735,6 +1800,13 @@ function updateCopsAndRobbers(state: GameState, dt: number): GameState {
     return pu;
   });
 
+  // Dynamic events + near-miss + drift
+  processDynamicEvents(s, updatedAmb, audio, newP);
+  const spdAmb = Math.sqrt(updatedAmb.vx ** 2 + updatedAmb.vy ** 2);
+  const maxSpdAmb = updatedAmb.maxSpeed * (updatedAmb.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, updatedAmb, spdAmb, audio, newP);
+  processDrift(s, updatedAmb, prevAngle, spdAmb, maxSpdAmb, audio, newP);
+
   s.timeLeft -= dt;
   if (s.timeLeft <= 0 && s.screen === 'playing') {
     s.timeLeft = 0;
@@ -1770,9 +1842,11 @@ function updateDemolitionDerby(state: GameState, dt: number): GameState {
 
   // Both ambulances
   const amb1 = { ...state.ambulance };
+  const prevAngle1 = amb1.angle;
   const { amb: a1 } = updateAmbulancePhysics(amb1, state.keys, state, dt, audio, newP);
 
   const amb2 = { ...(mp.ambulance2 || state.ambulance) };
+  const prevAngle2 = amb2.angle;
   const { amb: a2 } = updateAmbulancePhysics(amb2, mp.remotePlayer.keys, state, dt, audio, newP);
 
   // High-damage ambulance-ambulance collision
@@ -1785,6 +1859,11 @@ function updateDemolitionDerby(state: GameState, dt: number): GameState {
     const c = { ...car }; c.x += c.vx; c.y += c.vy;
     if (c.x < -200) c.x = cs + 200; if (c.x > cs + 200) c.x = -200;
     if (c.y < -200) c.y = cs + 200; if (c.y > cs + 200) c.y = -200;
+    const nearCarBldgs = state.buildingGrid ? state.buildingGrid.queryNear(c.x, c.y, 50) : state.buildings;
+    for (const b of nearCarBldgs) {
+      const r = resolveRectCollision(c.x - c.width / 2, c.y - c.height / 2, c.width, c.height, b.x, b.y, b.w, b.h);
+      if (r.hit) { c.x += r.dx; c.y += r.dy; if (r.dx !== 0) c.vx = -c.vx; if (r.dy !== 0) c.vy = -c.vy; }
+    }
     // Collision with ambulances
     const d1 = dist(c.x, c.y, a1.x, a1.y);
     if (d1 < 35) { a1.vx += (a1.x - c.x) * 0.05; a1.vy += (a1.y - c.y) * 0.05; }
@@ -1812,6 +1891,17 @@ function updateDemolitionDerby(state: GameState, dt: number): GameState {
     }
     return pu;
   });
+
+  // Dynamic events + near-miss + drift
+  processDynamicEvents(s, a1, audio, newP);
+  const spdA1 = Math.sqrt(a1.vx ** 2 + a1.vy ** 2);
+  const maxSpdA1 = a1.maxSpeed * (a1.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, a1, spdA1, audio, newP);
+  processDrift(s, a1, prevAngle1, spdA1, maxSpdA1, audio, newP);
+  const spdA2 = Math.sqrt(a2.vx ** 2 + a2.vy ** 2);
+  const maxSpdA2 = a2.maxSpeed * (a2.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, a2, spdA2, audio, newP);
+  processDrift(s, a2, prevAngle2, spdA2, maxSpdA2, audio, newP);
 
   // Win condition: opponent HP <= 0
   if (a1.health <= 0 && s.screen === 'playing') {
@@ -1857,9 +1947,11 @@ function updatePatientRace(state: GameState, dt: number): GameState {
 
   // Both ambulances
   const amb1 = { ...state.ambulance };
+  const prevAngle1 = amb1.angle;
   const { amb: a1 } = updateAmbulancePhysics(amb1, state.keys, state, dt, audio, newP);
 
   const amb2 = { ...(mp.ambulance2 || state.ambulance) };
+  const prevAngle2 = amb2.angle;
   const { amb: a2 } = updateAmbulancePhysics(amb2, mp.remotePlayer.keys, state, dt, audio, newP);
 
   // Ambulance collision: blocking (slow down, no big damage)
@@ -1867,11 +1959,16 @@ function updatePatientRace(state: GameState, dt: number): GameState {
   s.ambulance = a1;
   mp.ambulance2 = a2;
 
-  // Traffic
+  // Traffic (with building collisions)
   s.trafficCars = state.trafficCars.map(car => {
     const c = { ...car }; c.x += c.vx; c.y += c.vy;
     if (c.x < -200) c.x = cs + 200; if (c.x > cs + 200) c.x = -200;
     if (c.y < -200) c.y = cs + 200; if (c.y > cs + 200) c.y = -200;
+    const nearCarBldgs = state.buildingGrid ? state.buildingGrid.queryNear(c.x, c.y, 50) : state.buildings;
+    for (const b of nearCarBldgs) {
+      const r = resolveRectCollision(c.x - c.width / 2, c.y - c.height / 2, c.width, c.height, b.x, b.y, b.w, b.h);
+      if (r.hit) { c.x += r.dx; c.y += r.dy; if (r.dx !== 0) c.vx = -c.vx; if (r.dy !== 0) c.vy = -c.vy; }
+    }
     return c;
   });
 
@@ -1888,8 +1985,23 @@ function updatePatientRace(state: GameState, dt: number): GameState {
     const pSpd = (1.5 + pat.story.speed * (mission.difficulty * 0.12)) * (1 + pat.panicLevel * 1.2);
     if (nearD < 250) { pat.angle = Math.atan2(pat.y - nearestAmb.y, pat.x - nearestAmb.x) + (Math.random() - 0.5) * pat.story.erratic; }
     else if (Math.random() < 0.02) { pat.angle += (Math.random() - 0.5) * 2; }
-    pat.x += Math.cos(pat.angle) * pSpd; pat.y += Math.sin(pat.angle) * pSpd;
+    let dx2 = pat.x + Math.cos(pat.angle) * pSpd, dy2 = pat.y + Math.sin(pat.angle) * pSpd;
+    let patHit = false;
+    const nearPatBldgs = state.buildingGrid ? state.buildingGrid.queryNear(dx2, dy2, 50) : state.buildings;
+    for (let pass = 0; pass < 3; pass++) {
+      let resolved = true;
+      for (const b of nearPatBldgs) {
+        if (Math.abs(dx2 - b.x - b.w / 2) > b.w / 2 + 15 && Math.abs(dy2 - b.y - b.h / 2) > b.h / 2 + 15) continue;
+        const r = resolveRectCollision(dx2 - 10, dy2 - 10, 20, 20, b.x, b.y, b.w, b.h);
+        if (r.hit) { dx2 += r.dx * 1.1; dy2 += r.dy * 1.1; patHit = true; resolved = false; }
+      }
+      if (resolved) break;
+    }
+    if (patHit) pat.angle += (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2 + Math.random() * 0.5);
+    pat.vx = dx2 - pat.x; pat.vy = dy2 - pat.y;
+    pat.x = dx2; pat.y = dy2;
     pat.x = clamp(pat.x, 50, cs - 50); pat.y = clamp(pat.y, 50, cs - 50);
+    pat.health -= 0.008 * (1 + mission.difficulty * 0.4);
     return pat;
   });
 
@@ -1934,6 +2046,17 @@ function updatePatientRace(state: GameState, dt: number): GameState {
     }
     return pu;
   });
+
+  // Dynamic events + near-miss + drift
+  processDynamicEvents(s, a1, audio, newP);
+  const spdR1 = Math.sqrt(a1.vx ** 2 + a1.vy ** 2);
+  const maxSpdR1 = a1.maxSpeed * (a1.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, a1, spdR1, audio, newP);
+  processDrift(s, a1, prevAngle1, spdR1, maxSpdR1, audio, newP);
+  const spdR2 = Math.sqrt(a2.vx ** 2 + a2.vy ** 2);
+  const maxSpdR2 = a2.maxSpeed * (a2.nitroTimer > 0 ? 1.6 : 1.0);
+  processNearMiss(s, a2, spdR2, audio, newP);
+  processDrift(s, a2, prevAngle2, spdR2, maxSpdR2, audio, newP);
 
   s.timeLeft -= dt;
   if (s.timeLeft <= 0 && s.screen === 'playing') {

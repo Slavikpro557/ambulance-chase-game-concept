@@ -1,4 +1,4 @@
-import { GameState, Building, Patient, PowerUp, TrafficCar, RunnerPlayer, Ambulance, Hazard, Barrier } from './types';
+import { GameState, Building, Patient, PowerUp, TrafficCar, RunnerPlayer, Ambulance, Hazard, Barrier, Friend } from './types';
 import { MISSIONS } from './missions';
 import { MP_MISSIONS } from './mpMissions';
 
@@ -8,6 +8,18 @@ function getMissionsR(state: GameState) {
 }
 
 // ===== HELPERS =====
+
+function formatTimeAgo(ts: number): string {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'только что';
+  if (mins < 60) return `${mins} мин назад`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} дн назад`;
+  return `${Math.floor(days / 7)} нед назад`;
+}
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
   const words = text.split(' ');
@@ -1666,7 +1678,7 @@ export function renderMenuWithSave(ctx: CanvasRenderingContext2D, w: number, h: 
 
 // ===== MULTIPLAYER MENU =====
 
-export function renderMultiplayerMenu(ctx: CanvasRenderingContext2D, w: number, h: number, time: number) {
+export function renderMultiplayerMenu(ctx: CanvasRenderingContext2D, w: number, h: number, time: number, friendCount: number) {
   const grad = ctx.createLinearGradient(0, 0, 0, h);
   grad.addColorStop(0, '#0f172a'); grad.addColorStop(0.5, '#064e3b'); grad.addColorStop(1, '#0f172a');
   ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
@@ -1680,7 +1692,7 @@ export function renderMultiplayerMenu(ctx: CanvasRenderingContext2D, w: number, 
   const btnH = Math.round(56 * s);
   const btnGap = Math.round(14 * s);
 
-  const totalH = emojiS + 10 + titleS + 15 + subS + 30 + btnH * 3 + btnGap * 2;
+  const totalH = emojiS + 10 + titleS + 15 + subS + 30 + btnH * 4 + btnGap * 3;
   let y = Math.max(20, (h - totalH) / 2);
 
   ctx.font = `${emojiS}px Arial`;
@@ -1698,9 +1710,11 @@ export function renderMultiplayerMenu(ctx: CanvasRenderingContext2D, w: number, 
   const btnW = Math.min(Math.round(320 * s), w - 32);
   const btnX = w / 2 - btnW / 2;
 
+  const friendLabel = friendCount > 0 ? `👥 ДРУЗЬЯ (${friendCount})` : '👥 ДРУЗЬЯ';
   const btns = [
     { label: '🏠 СОЗДАТЬ ИГРУ (Хост)', color: 'rgba(34,197,94,', desc: 'Создать и ждать игрока' },
     { label: '🔗 ПОДКЛЮЧИТЬСЯ (Гость)', color: 'rgba(59,130,246,', desc: 'Ввести код хоста' },
+    { label: friendLabel, color: 'rgba(168,85,247,', desc: 'Быстрое подключение к друзьям' },
     { label: '◀ НАЗАД', color: 'rgba(100,116,139,', desc: '' },
   ];
 
@@ -1725,7 +1739,7 @@ export function getMultiplayerMenuLayout(w: number, h: number) {
   const subS = Math.round(16 * s);
   const btnH = Math.round(56 * s);
   const btnGap = Math.round(14 * s);
-  const totalH = emojiS + 10 + titleS + 15 + subS + 30 + btnH * 3 + btnGap * 2;
+  const totalH = emojiS + 10 + titleS + 15 + subS + 30 + btnH * 4 + btnGap * 3;
   const startY = Math.max(20, (h - totalH) / 2) + emojiS + 10 + titleS + 15 + subS + 30;
   const btnW = Math.min(Math.round(320 * s), w - 32);
   const btnX = w / 2 - btnW / 2;
@@ -1734,7 +1748,7 @@ export function getMultiplayerMenuLayout(w: number, h: number) {
 
 // ===== LOBBY =====
 
-export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number) {
+export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: number, h: number, time: number, friends?: Friend[]) {
   const grad = ctx.createLinearGradient(0, 0, 0, h);
   grad.addColorStop(0, '#0f172a'); grad.addColorStop(0.5, '#1e1b4b'); grad.addColorStop(1, '#0f172a');
   ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
@@ -1765,12 +1779,14 @@ export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: 
   const statusColors: Record<string, string> = {
     hostWaiting: '#fbbf24', guestEnterCode: '#60a5fa',
     connected: '#34d399', modeSelect: '#34d399',
+    friendsList: '#a855f7',
   };
   const statusTexts: Record<string, string> = {
     hostWaiting: '⏳ Ожидание игрока...',
     guestEnterCode: '🔗 Введите код комнаты',
     connected: '✅ Подключено!',
     modeSelect: '🎮 Выбор режима',
+    friendsList: '👥 Список друзей',
   };
   const statusColor = statusColors[mp.lobbyScreen] || '#94a3b8';
   const statusText = statusTexts[mp.lobbyScreen] || mp.lobbyScreen;
@@ -1928,6 +1944,68 @@ export function renderLobby(ctx: CanvasRenderingContext2D, state: GameState, w: 
     y += Math.round(15 * s);
   }
 
+  // Friends list
+  if (mp.lobbyScreen === 'friendsList') {
+    const flist = friends || [];
+    if (flist.length === 0) {
+      ctx.fillStyle = '#94a3b8'; ctx.font = `${textS}px Arial`;
+      ctx.fillText('Пока нет друзей', w / 2, y + textS / 2);
+      y += textS + 10;
+      ctx.fillStyle = '#64748b'; ctx.font = `${smallS}px Arial`;
+      ctx.fillText('Сыграйте с кем-нибудь — друзья', w / 2, y + smallS / 2);
+      y += smallS + 5;
+      ctx.fillText('добавятся автоматически!', w / 2, y + smallS / 2);
+      y += smallS + 20;
+    } else {
+      const itemH = Math.round(62 * s);
+      const joinBtnW = Math.round(80 * s);
+      const delBtnW = Math.round(36 * s);
+      const maxVisible = Math.min(flist.length, Math.floor((h - y - btnH - 60) / (itemH + 8)));
+      for (let i = 0; i < maxVisible; i++) {
+        const f = flist[i];
+        const iy = y + i * (itemH + 8);
+        // Card background
+        ctx.fillStyle = 'rgba(30,41,59,0.8)';
+        ctx.beginPath(); ctx.roundRect(btnX, iy, btnW, itemH, 10); ctx.fill();
+        ctx.strokeStyle = 'rgba(168,85,247,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+        // Friend name
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#e2e8f0'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+        ctx.fillText(f.name, btnX + Math.round(12 * s), iy + itemH * 0.35);
+        // Info line
+        const ago = formatTimeAgo(f.lastPlayed);
+        ctx.fillStyle = '#94a3b8'; ctx.font = `${Math.round(11 * s)}px Arial`;
+        ctx.fillText(`${ago} | ${f.gamesPlayed} ${f.gamesPlayed === 1 ? 'игра' : f.gamesPlayed < 5 ? 'игры' : 'игр'}`, btnX + Math.round(12 * s), iy + itemH * 0.7);
+        ctx.textAlign = 'center';
+        // Join button
+        const jx = btnX + btnW - joinBtnW - delBtnW - Math.round(16 * s);
+        const jy = iy + (itemH - Math.round(34 * s)) / 2;
+        const jh = Math.round(34 * s);
+        const joinPulse = 0.7 + Math.sin(time * 0.08 + i) * 0.3;
+        ctx.fillStyle = `rgba(34,197,94,${joinPulse})`;
+        ctx.beginPath(); ctx.roundRect(jx, jy, joinBtnW, jh, 6); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(12 * s)}px Arial`;
+        ctx.fillText('ИГРАТЬ', jx + joinBtnW / 2, jy + jh / 2);
+        // Delete button
+        const dx = btnX + btnW - delBtnW - Math.round(6 * s);
+        ctx.fillStyle = 'rgba(239,68,68,0.5)';
+        ctx.beginPath(); ctx.roundRect(dx, jy, delBtnW, jh, 6); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+        ctx.fillText('✕', dx + delBtnW / 2, jy + jh / 2);
+      }
+      y += maxVisible * (itemH + 8) + 10;
+    }
+
+    // Add by code button
+    const addBtnH = Math.round(44 * s);
+    ctx.fillStyle = 'rgba(59,130,246,0.7)';
+    ctx.beginPath(); ctx.roundRect(btnX, y, btnW, addBtnH, 10); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(14 * s)}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.fillText('🔗 ПОДКЛЮЧИТЬСЯ ПО КОДУ', w / 2, y + addBtnH / 2);
+    y += addBtnH + 10;
+  }
+
   // Mode select (host only when connected)
   if (mp.lobbyScreen === 'modeSelect' || mp.lobbyScreen === 'connected') {
     ctx.fillStyle = '#94a3b8'; ctx.font = `${smallS}px Arial`;
@@ -1991,6 +2069,25 @@ export function getLobbyLayout(w: number, h: number) {
   const backBtnH = Math.round(40 * s);
   const backY = h - btnH - Math.round(15 * s);
   return { btnX, btnW, btnH, btnGap, smallS, titleS, textS, backY, backBtnH, s };
+}
+
+export function getFriendsListLayout(w: number, h: number) {
+  const s = sf(w, h);
+  const titleS = Math.round(28 * s);
+  const textS = Math.round(16 * s);
+  const smallS = Math.round(13 * s);
+  const btnH = Math.round(50 * s);
+  const btnW = Math.min(Math.round(340 * s), w - 24);
+  const btnX = w / 2 - btnW / 2;
+  // y offset for friend items start (header + status + gap)
+  const itemStartY = Math.round(30 * s) + titleS + 20 + textS + 20;
+  const itemH = Math.round(62 * s);
+  const itemGap = 8;
+  const joinBtnW = Math.round(80 * s);
+  const delBtnW = Math.round(36 * s);
+  const joinBtnH = Math.round(34 * s);
+  const addBtnH = Math.round(44 * s);
+  return { s, btnX, btnW, btnH, itemStartY, itemH, itemGap, joinBtnW, delBtnW, joinBtnH, addBtnH, titleS, textS, smallS };
 }
 
 // ===== MULTIPLAYER HUD =====

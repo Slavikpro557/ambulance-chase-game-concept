@@ -12,7 +12,15 @@ export type GameScreen = 'menu' | 'modeSelect' | 'briefing' | 'playing' | 'pause
 export type GameMode = 'ambulance' | 'runner' | 'extremal' | 'coopRescue' | 'copsAndRobbers' | 'demolitionDerby' | 'patientRace';
 export type MultiplayerMode = 'coopRescue' | 'copsAndRobbers' | 'demolitionDerby' | 'patientRace';
 export type NetRole = 'host' | 'guest';
-export type LobbyScreen = 'hostWaiting' | 'guestEnterCode' | 'connected' | 'modeSelect';
+export type LobbyScreen = 'hostWaiting' | 'guestEnterCode' | 'connected' | 'modeSelect' | 'friendsList';
+
+export interface Friend {
+  id: string;
+  name: string;
+  lastCode: string;
+  lastPlayed: number;
+  gamesPlayed: number;
+}
 
 export interface PatientStory {
   name: string; age: number; condition: string; emoji: string;
@@ -298,6 +306,9 @@ export interface MultiplayerState {
   guestMoney: number;
   hostReady: boolean;
   guestReady: boolean;
+  // Friends
+  remoteFriendId: string;
+  remoteFriendName: string;
 }
 
 export interface FullSyncPayload {

@@ -80,7 +80,8 @@ export type NetMessageType =
   | 'upgrade'        // host→guest: show upgrade screen with data
   | 'upgradeChoice'  // guest→host: guest selected an upgrade
   | 'ready'          // both: player is ready (briefing/upgrade)
-  | 'syncAck';       // guest→host: fullSync received successfully
+  | 'syncAck'        // guest→host: fullSync received successfully
+  | 'friendInfo';    // both: exchange friend ID + name on connect
 
 export interface NetMessage {
   type: NetMessageType;

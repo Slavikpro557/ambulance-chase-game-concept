@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
-import { GameState, Upgrades, GameMode, MultiplayerState, MultiplayerMode, Keys } from './game/types';
-import { createInitialState, createInitialStateWithSave, startMission, startRunnerLevel, updateGame, applyUpgrade, saveProgress, loadProgress, MISSIONS } from './game/engine';
-import { render, renderMenu, renderBriefing, renderRunnerBriefing, renderSaved, renderFailed, renderUpgrade, renderEnding, renderPaused, getPauseButtonLayout, renderTransition, renderSpeedLines, renderTutorial, renderOrientationHint, renderMultiplayerMenu, getMultiplayerMenuLayout, renderLobby, getLobbyLayout, drawMultiplayerHUD } from './game/renderer';
+import { GameState, Upgrades, GameMode, MultiplayerState, MultiplayerMode, Keys, Friend } from './game/types';
+import { createInitialState, createInitialStateWithSave, startMission, startRunnerLevel, updateGame, applyUpgrade, saveProgress, loadProgress, MISSIONS, getOrCreateFriendId, loadFriends, addOrUpdateFriend, removeFriend } from './game/engine';
+import { render, renderMenu, renderBriefing, renderRunnerBriefing, renderSaved, renderFailed, renderUpgrade, renderEnding, renderPaused, getPauseButtonLayout, renderTransition, renderSpeedLines, renderTutorial, renderOrientationHint, renderMultiplayerMenu, getMultiplayerMenuLayout, renderLobby, getLobbyLayout, getFriendsListLayout, drawMultiplayerHUD } from './game/renderer';
 import { gameAudio } from './game/audio';
 import { GameNetwork, NetMessage } from './game/net';
 import { serializeKeys, deserializeKeys, createSnapshot, serializeSnapshot, deserializeSnapshot, createFullSyncPayload, applySnapshotToState, applyFullSyncPayload, interpolateSnapshots } from './game/netSync';
@@ -60,6 +60,8 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
     guestMoney: 0,
     hostReady: false,
     guestReady: false,
+    remoteFriendId: '',
+    remoteFriendName: '',
   };
 }
 
@@ -76,6 +78,8 @@ export function App() {
   const lastCountdownRef = useRef(0);
   const networkRef = useRef<GameNetwork | null>(null);
   const snapshotFrameRef = useRef(0);
+  const friendIdRef = useRef(getOrCreateFriendId());
+  const friendsRef = useRef<Friend[]>(loadFriends());
   const [, setForceUpdate] = useState(0);
 
   useEffect(() => { isMobileRef.current = 'ontouchstart' in window || navigator.maxTouchPoints > 0; }, []);
@@ -94,6 +98,8 @@ export function App() {
       if (!s.mp) return;
       if (connState === 'connected') {
         stateRef.current = { ...s, mp: { ...s.mp, connected: true, lobbyScreen: 'modeSelect' } };
+        // Exchange friend info
+        net.sendReliable({ type: 'friendInfo', seq: 0, ts: performance.now(), data: { id: friendIdRef.current, name: s.mp.netRole === 'host' ? 'Хост' : 'Гость' } });
         setForceUpdate(v => v + 1);
       } else if (connState === 'disconnected') {
         stateRef.current = { ...s, mp: { ...s.mp, disconnected: true } };
@@ -149,6 +155,10 @@ export function App() {
                   mp: { ...s.mp, roundEndTime: performance.now() },
                 };
                 gameAudio.siren(false);
+                // Guest auto-save friend
+                if (s.mp.remoteFriendId && s.mp.roomCode) {
+                  friendsRef.current = addOrUpdateFriend(s.mp.remoteFriendId, s.mp.remoteFriendName || 'Хост', s.mp.roomCode);
+                }
                 setForceUpdate(v => v + 1);
                 break;
               }
@@ -277,6 +287,13 @@ export function App() {
               net2?.sendReliable({ type: 'briefing', seq: 0, ts: performance.now(), data: { missionIndex: s.missionIndex } });
             }
             setForceUpdate(v => v + 1);
+          }
+          break;
+        }
+        case 'friendInfo': {
+          const info = msg.data as { id: string; name: string };
+          if (info && info.id && s.mp) {
+            stateRef.current = { ...s, mp: { ...s.mp, remoteFriendId: info.id, remoteFriendName: info.name } };
           }
           break;
         }
@@ -653,7 +670,7 @@ export function App() {
         if (canvas && clickX !== undefined && clickY !== undefined) {
           const w = canvas.width, h = canvas.height;
           const layout = getMultiplayerMenuLayout(w, h);
-          for (let i = 0; i < 3; i++) {
+          for (let i = 0; i < 4; i++) {
             const by = layout.startY + i * (layout.btnH + layout.btnGap);
             if (clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW && clickY >= by && clickY <= by + layout.btnH) {
               if (i === 0) {
@@ -678,6 +695,12 @@ export function App() {
                 stateRef.current = { ...state, screen: 'lobby', mp: mpState };
                 networkRef.current = new GameNetwork();
                 setupNetworkCallbacks(networkRef.current);
+              } else if (i === 2) {
+                // Friends list
+                friendsRef.current = loadFriends();
+                const mpState = createMultiplayerState('guest');
+                mpState.lobbyScreen = 'friendsList';
+                stateRef.current = { ...state, screen: 'lobby', mp: mpState };
               } else {
                 // Back
                 stateRef.current = { ...state, screen: 'menu' };
@@ -698,9 +721,82 @@ export function App() {
         // Back button (always at bottom)
         if (clickY >= layout.backY && clickY <= layout.backY + layout.backBtnH &&
             clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
-          networkRef.current?.destroy();
-          networkRef.current = null;
-          stateRef.current = createInitialStateWithSave();
+          if (mp.lobbyScreen === 'friendsList') {
+            // Go back to multiplayer menu
+            stateRef.current = { ...state, screen: 'multiplayerMenu', mp: undefined };
+          } else {
+            networkRef.current?.destroy();
+            networkRef.current = null;
+            stateRef.current = createInitialStateWithSave();
+          }
+          break;
+        }
+
+        // Friends list interactions
+        if (mp.lobbyScreen === 'friendsList') {
+          const fl = getFriendsListLayout(w, h);
+          const flist = friendsRef.current;
+
+          if (flist.length > 0) {
+            const maxVisible = Math.min(flist.length, Math.floor((h - fl.itemStartY - fl.btnH - 60) / (fl.itemH + fl.itemGap)));
+            for (let i = 0; i < maxVisible; i++) {
+              const f = flist[i];
+              const iy = fl.itemStartY + i * (fl.itemH + fl.itemGap);
+              // Join button
+              const jx = fl.btnX + fl.btnW - fl.joinBtnW - fl.delBtnW - Math.round(16 * fl.s);
+              const jy = iy + (fl.itemH - fl.joinBtnH) / 2;
+              if (clickX >= jx && clickX <= jx + fl.joinBtnW && clickY >= jy && clickY <= jy + fl.joinBtnH) {
+                // Try to join friend's last room code
+                const mpState = createMultiplayerState('guest');
+                mpState.inputCode = f.lastCode;
+                stateRef.current = { ...state, screen: 'lobby', mp: mpState };
+                const net = new GameNetwork();
+                networkRef.current = net;
+                setupNetworkCallbacks(net);
+                net.joinRoom(f.lastCode).catch(() => {
+                  const s2 = stateRef.current;
+                  if (s2.mp) {
+                    stateRef.current = {
+                      ...s2,
+                      mp: { ...s2.mp, lobbyScreen: 'friendsList', inputCode: '', inputError: 'Друг не в сети. Попробуйте код.' },
+                    };
+                    setForceUpdate(v => v + 1);
+                  }
+                });
+                break;
+              }
+              // Delete button
+              const dx = fl.btnX + fl.btnW - fl.delBtnW - Math.round(6 * fl.s);
+              if (clickX >= dx && clickX <= dx + fl.delBtnW && clickY >= jy && clickY <= jy + fl.joinBtnH) {
+                friendsRef.current = removeFriend(f.id);
+                setForceUpdate(v => v + 1);
+                break;
+              }
+            }
+            // "Add by code" button
+            const addY = fl.itemStartY + maxVisible * (fl.itemH + fl.itemGap) + 10;
+            if (clickY >= addY && clickY <= addY + fl.addBtnH &&
+                clickX >= fl.btnX && clickX <= fl.btnX + fl.btnW) {
+              const mpState = createMultiplayerState('guest');
+              stateRef.current = { ...state, screen: 'lobby', mp: mpState };
+              networkRef.current = new GameNetwork();
+              setupNetworkCallbacks(networkRef.current);
+              break;
+            }
+          } else {
+            // No friends — "Add by code" button position
+            const noFriendsH = layout.textS + 10 + layout.smallS + 5 + layout.smallS + 20;
+            const addY = Math.round(30 * layout.s) + layout.titleS + 20 + layout.textS + 20 + noFriendsH;
+            const addBtnH = Math.round(44 * layout.s);
+            if (clickY >= addY && clickY <= addY + addBtnH &&
+                clickX >= layout.btnX && clickX <= layout.btnX + layout.btnW) {
+              const mpState = createMultiplayerState('guest');
+              stateRef.current = { ...state, screen: 'lobby', mp: mpState };
+              networkRef.current = new GameNetwork();
+              setupNetworkCallbacks(networkRef.current);
+              break;
+            }
+          }
           break;
         }
 
@@ -1168,6 +1264,11 @@ export function App() {
           if (isHost && net?.isConnected && prevScreen === 'playing' && stateRef.current.screen !== 'playing') {
             const endScreen = stateRef.current.screen; // 'saved' or 'failed'
             net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: { roundEnd: endScreen, missionIndex: stateRef.current.missionIndex } });
+            // Auto-save friend after first round
+            const rmp = stateRef.current.mp;
+            if (rmp?.remoteFriendId && rmp.roomCode) {
+              friendsRef.current = addOrUpdateFriend(rmp.remoteFriendId, rmp.remoteFriendName || 'Гость', rmp.roomCode);
+            }
           }
 
           // Host: send snapshot adaptively (~10/sec, throttle if buffer backs up)
@@ -1362,8 +1463,8 @@ export function App() {
         case 'failed': renderFailed(ctx, stateRef.current, w, h, time); break;
         case 'upgrade': renderUpgrade(ctx, stateRef.current, w, h, time); break;
         case 'ending': renderEnding(ctx, stateRef.current, w, h, time); break;
-        case 'multiplayerMenu': renderMultiplayerMenu(ctx, w, h, time); break;
-        case 'lobby': renderLobby(ctx, stateRef.current, w, h, time); break;
+        case 'multiplayerMenu': renderMultiplayerMenu(ctx, w, h, time, friendsRef.current.length); break;
+        case 'lobby': renderLobby(ctx, stateRef.current, w, h, time, friendsRef.current); break;
       }
 
       // Disconnect overlay on any screen (not just playing)
