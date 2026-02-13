@@ -309,6 +309,8 @@ export interface MultiplayerState {
   // Friends
   remoteFriendId: string;
   remoteFriendName: string;
+  // Sync guard: guest ignores snapshots until fullSync is received
+  fullSyncReceived: boolean;
 }
 
 export interface FullSyncPayload {

@@ -62,6 +62,7 @@ function createMultiplayerState(role: 'host' | 'guest'): MultiplayerState {
     guestReady: false,
     remoteFriendId: '',
     remoteFriendName: '',
+    fullSyncReceived: false,
   };
 }
 
@@ -78,6 +79,7 @@ export function App() {
   const lastCountdownRef = useRef(0);
   const networkRef = useRef<GameNetwork | null>(null);
   const snapshotFrameRef = useRef(0);
+  const syncAckedRef = useRef(false);
   const friendIdRef = useRef(getOrCreateFriendId());
   const friendsRef = useRef<Friend[]>(loadFriends());
   const [, setForceUpdate] = useState(0);
@@ -97,7 +99,9 @@ export function App() {
       const s = stateRef.current;
       if (!s.mp) return;
       if (connState === 'connected') {
-        stateRef.current = { ...s, mp: { ...s.mp, connected: true, lobbyScreen: 'modeSelect' } };
+        // For guest, persist the room code they used to connect (needed for friend save)
+        const connRoomCode = s.mp.netRole === 'guest' ? (s.mp.inputCode || s.mp.roomCode) : s.mp.roomCode;
+        stateRef.current = { ...s, mp: { ...s.mp, connected: true, lobbyScreen: 'modeSelect', roomCode: connRoomCode } };
         // Exchange friend info
         net.sendReliable({ type: 'friendInfo', seq: 0, ts: performance.now(), data: { id: friendIdRef.current, name: s.mp.netRole === 'host' ? 'Хост' : 'Гость' } });
         setForceUpdate(v => v + 1);
@@ -126,7 +130,9 @@ export function App() {
         }
         case 'snapshot': {
           // Guest receives state snapshot (data is string)
-          if (s.mp.netRole === 'guest') {
+          // CRITICAL: skip snapshots until fullSync has been received and applied
+          // Otherwise applySnapshotToState maps over empty arrays → stays empty
+          if (s.mp.netRole === 'guest' && s.mp.fullSyncReceived) {
             try {
               const snapData = typeof msg.data === 'string' ? msg.data : String(msg.data);
               const snap = deserializeSnapshot(snapData);
@@ -152,7 +158,7 @@ export function App() {
                   ...s,
                   screen: payload.roundEnd as 'saved' | 'failed',
                   missionIndex: payload.missionIndex ?? s.missionIndex,
-                  mp: { ...s.mp, roundEndTime: performance.now() },
+                  mp: { ...s.mp, roundEndTime: performance.now(), fullSyncReceived: false, prevSnapshot: null, currSnapshot: null },
                 };
                 gameAudio.siren(false);
                 // Guest auto-save friend
@@ -168,13 +174,17 @@ export function App() {
                   ...s,
                   screen: 'lobby',
                   missionIndex: 0,
-                  mp: { ...s.mp, lobbyScreen: 'modeSelect', roundEndTime: 0 },
+                  mp: { ...s.mp, lobbyScreen: 'modeSelect', roundEndTime: 0, fullSyncReceived: false, prevSnapshot: null, currSnapshot: null },
                 };
                 s.flashMessages.push({ text: '🏆 Все миссии пройдены! Победа!', timer: 300, color: '#fbbf24' });
                 setForceUpdate(v => v + 1);
                 break;
               }
               const newState = applyFullSyncPayload(s, payload, s.mp.multiplayerMode);
+              // Mark fullSync as received so snapshots can start being applied
+              if (newState.mp) {
+                newState.mp = { ...newState.mp, fullSyncReceived: true, prevSnapshot: null, currSnapshot: null };
+              }
               stateRef.current = newState;
               setForceUpdate(v => v + 1);
               // Send ACK so host knows fullSync was received
@@ -390,9 +400,10 @@ export function App() {
     stateRef.current = newState;
     gameAudio.siren(true);
 
-    // Send full sync to guest with retry — wait for ACK before sending start
+    // Send full sync to guest with retry — wait for ACK before sending start & snapshots
     const payload = createFullSyncPayload(newState);
     let syncAcked = false;
+    syncAckedRef.current = false; // Block snapshots until guest confirms fullSync
     const sendFullSync = () => {
       net.sendReliable({ type: 'fullSync', seq: 0, ts: performance.now(), data: payload });
     };
@@ -406,12 +417,14 @@ export function App() {
     let ackChecks = 0;
     const checkAckAndStart = () => {
       if (syncAcked) {
+        syncAckedRef.current = true; // Unblock snapshot sending
         sendStart();
         return;
       }
       ackChecks++;
       if (ackChecks >= 100) {
         // 5s timeout — send start anyway as fallback
+        syncAckedRef.current = true;
         sendStart();
         return;
       }
@@ -428,7 +441,7 @@ export function App() {
     // Listen for ACK
     const origHandler = net.onMessage;
     net.onMessage = (msg) => {
-      if (msg.type === 'syncAck') { syncAcked = true; retryTimers.forEach(t => clearTimeout(t)); net.onMessage = origHandler; }
+      if (msg.type === 'syncAck') { syncAcked = true; syncAckedRef.current = true; retryTimers.forEach(t => clearTimeout(t)); net.onMessage = origHandler; }
       if (origHandler) origHandler(msg);
     };
 
@@ -1298,7 +1311,8 @@ export function App() {
           }
 
           // Host: send snapshot adaptively (~10/sec, throttle if buffer backs up)
-          if (isHost && net?.isConnected && stateRef.current.screen === 'playing') {
+          // CRITICAL: don't send snapshots until guest has confirmed fullSync (syncAcked)
+          if (isHost && net?.isConnected && stateRef.current.screen === 'playing' && syncAckedRef.current) {
             snapshotFrameRef.current++;
             // Adaptive: check WebRTC buffer, increase interval if congested
             let sendInterval = 6; // default ~10Hz
